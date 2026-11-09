@@ -1,0 +1,21 @@
+# Derleme çıktısı
+build/
+
+# Diskten üretilen rekompile kod (oyun koduna ait; paylaşılmaz, vs_recomp ile yeniden üretilir)
+generated_recomp/
+
+# vs_inspect ile diskten çıkarılan dosyalar
+extracted/
+
+# Disk imajları
+*.bin
+*.cue
+*.iso
+
+# Çalışma zamanı dökümleri
+*.ppm
+*.wav
+
+# Editör / IDE
+.vs/
+.vscode/
