@@ -1,8 +1,10 @@
 #include "vsport/cdrom_iso.hpp"
 #include "vsport/d3d11_renderer.hpp"
+#include "vsport/pad_mapping.hpp"
 #include "vsport/psx_exe.hpp"
 #include "vsport/runtime.hpp"
 #include "vsport/win32_audio.hpp"
+#include "vsport/win32_input.hpp"
 
 #ifdef VSPORT_HAS_AOT_MODULES
 #include "vs_aot_registry.hpp"
@@ -11,12 +13,14 @@
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <string>
 #include <vector>
 
 #ifdef _WIN32
 #include <windows.h>
+#include <mmsystem.h> // timeBeginPeriod / timeEndPeriod (winmm)
 #endif
 
 using namespace vsport;
@@ -205,9 +209,11 @@ using vsport::dump_halt_trace;
 
 int main(int argc, char** argv) {
     std::filesystem::path disc_path;
+    std::filesystem::path sbi_path;
     std::filesystem::path dump_ppm_path;
     std::filesystem::path dump_disp_path;
     std::filesystem::path dump_wav_path;
+    std::filesystem::path dump_ram_path;
     bool headless   = false;
     bool self_demo  = false;
     bool use_aot    = true;
@@ -215,11 +221,44 @@ int main(int argc, char** argv) {
     bool sw_present = false;
     bool test_d3d11 = false;
     u64 max_cycles  = 2'000'000ull;
+    // Scripted headless input: --press BUTTON@VBLANK[:FRAMES][,...] (e.g. START@560,CROSS@900:4)
+    struct ScriptedPress { u16 bits; u32 at_vblank; u32 frames; };
+    std::vector<ScriptedPress> presses;
+    const auto parse_presses = [&](const std::string& spec) -> bool {
+        struct Name { const char* n; u16 bit; };
+        constexpr Name NAMES[] = {
+            {"SELECT", pad::SELECT}, {"START", pad::START}, {"UP", pad::UP}, {"RIGHT", pad::RIGHT},
+            {"DOWN", pad::DOWN}, {"LEFT", pad::LEFT}, {"L2", pad::L2}, {"R2", pad::R2},
+            {"L1", pad::L1}, {"R1", pad::R1}, {"TRIANGLE", pad::TRIANGLE}, {"CIRCLE", pad::CIRCLE},
+            {"CROSS", pad::CROSS}, {"SQUARE", pad::SQUARE},
+        };
+        std::size_t pos = 0;
+        while (pos < spec.size()) {
+            const std::size_t end  = std::min(spec.find(',', pos), spec.size());
+            const std::string item = spec.substr(pos, end - pos);
+            const std::size_t at   = item.find('@');
+            if (at == std::string::npos) return false;
+            const std::string name = item.substr(0, at);
+            u16 bit = 0;
+            for (const auto& n : NAMES) {
+                if (name == n.n) bit = n.bit;
+            }
+            if (bit == 0) return false;
+            char* rest = nullptr;
+            const u32 vb = static_cast<u32>(std::strtoul(item.c_str() + at + 1, &rest, 10));
+            const u32 frames = (rest && *rest == ':') ? static_cast<u32>(std::strtoul(rest + 1, nullptr, 10)) : 8u;
+            presses.push_back({bit, vb, frames});
+            pos = end + 1;
+        }
+        return true;
+    };
 
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
         if ((arg == "--disc" || arg == "-d") && i + 1 < argc) {
             disc_path = argv[++i];
+        } else if (arg == "--sbi" && i + 1 < argc) {
+            sbi_path = argv[++i];
         } else if (arg == "--headless") {
             headless = true;
         } else if (arg == "--self-demo") {
@@ -240,6 +279,13 @@ int main(int argc, char** argv) {
             dump_disp_path = argv[++i];
         } else if (arg == "--dump-wav" && i + 1 < argc) {
             dump_wav_path = argv[++i];
+        } else if (arg == "--dump-ram" && i + 1 < argc) {
+            dump_ram_path = argv[++i];
+        } else if (arg == "--press" && i + 1 < argc) {
+            if (!parse_presses(argv[++i])) {
+                std::cerr << "[HATA] --press bicimi: BUTON@VBLANK[:KARE][,...] (or. START@560,CROSS@900:4)\n";
+                return 1;
+            }
         }
     }
 
@@ -274,7 +320,7 @@ int main(int argc, char** argv) {
 
     if (disc_path.empty() && !self_demo) {
         std::cout << "Kullanim:\n"
-                  << "  vs_host --disc <VagrantStory.cue|.bin|.iso> [--headless] [--no-aot] [--cycles N] [--dump-vram vram.ppm]\n"
+                  << "  vs_host --disc <VagrantStory.cue|.bin|.iso> [--sbi altkanal.sbi] [--headless] [--no-aot] [--cycles N] [--dump-vram vram.ppm]\n"
                   << "  vs_host --self-demo [--headless] [--dump-vram demo.ppm]\n";
         return 1;
     }
@@ -299,6 +345,19 @@ int main(int argc, char** argv) {
             std::cerr << "[HATA] Disk acilamadi: " << err << "\n";
             return 1;
         }
+        if (!sbi_path.empty() && !disc.load_sbi(sbi_path, &err)) {
+            std::cerr << "[HATA] " << err << "\n";
+            return 1;
+        }
+        if (disc.subq_override_count() > 0) {
+            std::printf("[vs_host] Alt kanal verisi yuklendi: %s (%zu sektor)\n",
+                        disc.sbi_path().string().c_str(), disc.subq_override_count());
+        } else if (disc.volume_id() == "SLES-02754") {
+            std::printf("[vs_host] UYARI: Bu PAL disk LibCrypt korumali; diskin .sbi alt kanal dosyasi olmadan\n"
+                        "          oyun New Game'den sonra 'NOW LOADING'de kalir. .sbi dosyasini .cue ile ayni\n"
+                        "          klasore ayni adla koyun ya da --sbi <dosya> ile belirtin.\n");
+        }
+        std::fflush(stdout);
         rt.attach_disc(&disc);
 
         const auto cnf = disc.parse_system_cnf();
@@ -324,11 +383,17 @@ int main(int argc, char** argv) {
         if (self_demo) {
             step_hardware_self_demo(rt, 0.55f);
         } else {
-            if (auto_start) {
-                rt.set_vblank_callback([&rt]() {
+            if (auto_start || !presses.empty()) {
+                rt.set_vblank_callback([&rt, &presses, auto_start]() {
                     const u32 vb = rt.vblank_count();
-                    const bool pulse = (vb >= 350u) && ((vb % 60u) >= 10u && (vb % 60u) <= 18u);
-                    rt.set_pad_buttons(pulse ? static_cast<u16>(~(1u << 3)) : 0xFFFFu);
+                    u16 pressed = 0;
+                    if (auto_start && vb >= 350u && (vb % 60u) >= 10u && (vb % 60u) <= 18u) {
+                        pressed |= pad::START;
+                    }
+                    for (const auto& p : presses) {
+                        if (vb >= p.at_vblank && vb < p.at_vblank + p.frames) pressed |= p.bits;
+                    }
+                    rt.set_pad_buttons(static_cast<u16>(~pressed));
                 });
             }
             const u64 executed = rt.run(ctx, max_cycles);
@@ -371,6 +436,12 @@ int main(int argc, char** argv) {
         if (!dump_disp_path.empty()) {
             rt.gpu().dump_ppm(dump_disp_path, false);
             std::printf("[vs_host] Aktif ekran goruntusu disari aktarildi: %s\n", dump_disp_path.string().c_str());
+        }
+        if (!dump_ram_path.empty()) {
+            const auto ram = rt.ram_span();
+            std::ofstream out(dump_ram_path, std::ios::binary);
+            out.write(reinterpret_cast<const char*>(ram.data()), static_cast<std::streamsize>(ram.size()));
+            std::printf("[vs_host] PS1 RAM (%zu B) disari aktarildi: %s\n", ram.size(), dump_ram_path.string().c_str());
         }
         if (!dump_wav_path.empty()) {
             rt.spu().dump_wav(dump_wav_path);
@@ -416,12 +487,45 @@ int main(int argc, char** argv) {
     if (audio.initialize(PsxSpu::SAMPLE_RATE)) {
         std::printf("[vs_host] WinMM 44.1 kHz Stereo SPU ADPCM ses cikisi aktif.\n");
     }
+    Win32GamepadInput gamepad;
+    gamepad.initialize(hwnd);
+    std::printf("[vs_host] Gamepad destegi aktif (XInput + DirectInput); kontrolcu istediginiz an takilabilir.\n");
     std::fflush(stdout);
     host_state.update_window_title(hwnd);
 
     std::vector<u32> frame_bgra;
     MSG msg{};
     bool running = true;
+
+    // Real-time frame pacing. The emulated CPU runs far faster than a PS1, so every emulated
+    // VBlank waits until its wall-clock slot: 50 Hz for PAL, 60 Hz for NTSC (matching the runtime's
+    // VBlank period, so SPU audio stays at 44.1 kHz). Hold Tab to fast-forward.
+    LARGE_INTEGER qpc_freq{};
+    LARGE_INTEGER next_frame{};
+    QueryPerformanceFrequency(&qpc_freq);
+    QueryPerformanceCounter(&next_frame);
+    timeBeginPeriod(1);
+    auto throttle_frame = [&]() {
+        LARGE_INTEGER now{};
+        QueryPerformanceCounter(&now);
+        if ((GetAsyncKeyState(VK_TAB) & 0x8000) != 0) {
+            next_frame = now;
+            return;
+        }
+        const LONGLONG period = qpc_freq.QuadPart / (rt.gpu().is_pal() ? 50 : 60);
+        next_frame.QuadPart += period;
+        if (now.QuadPart > next_frame.QuadPart + period * 4) {
+            next_frame = now; // Far behind (slow frame or window drag): resync instead of racing
+            return;
+        }
+        for (;;) {
+            QueryPerformanceCounter(&now);
+            const LONGLONG remain = next_frame.QuadPart - now.QuadPart;
+            if (remain <= 0) break;
+            const LONGLONG ms = remain * 1000 / qpc_freq.QuadPart;
+            Sleep(ms > 2 ? static_cast<DWORD>(ms - 1) : 0u);
+        }
+    };
 
     auto present_and_pump = [&]() {
         while (PeekMessageA(&msg, nullptr, 0, 0, PM_REMOVE)) {
@@ -434,27 +538,29 @@ int main(int argc, char** argv) {
         }
         if (!running) return;
 
-        // Map PC keyboard to PS1 Digital Pad (active-low bits)
-        u16 pad = 0xFFFFu;
-        if (GetAsyncKeyState(VK_RETURN) & 0x8000) pad &= ~(1u << 3);  // START
-        if (GetAsyncKeyState(VK_BACK)   & 0x8000) pad &= ~(1u << 0);  // SELECT
-        if (GetAsyncKeyState(VK_UP)     & 0x8000) pad &= ~(1u << 4);  // UP
-        if (GetAsyncKeyState(VK_RIGHT)  & 0x8000) pad &= ~(1u << 5);  // RIGHT
-        if (GetAsyncKeyState(VK_DOWN)   & 0x8000) pad &= ~(1u << 6);  // DOWN
-        if (GetAsyncKeyState(VK_LEFT)   & 0x8000) pad &= ~(1u << 7);  // LEFT
-        if (GetAsyncKeyState('Z')       & 0x8000) pad &= ~(1u << 14); // CROSS (Confirm)
-        if (GetAsyncKeyState('X')       & 0x8000) pad &= ~(1u << 13); // CIRCLE (Cancel)
-        if (GetAsyncKeyState('A')       & 0x8000) pad &= ~(1u << 15); // SQUARE
-        if (GetAsyncKeyState('S')       & 0x8000) pad &= ~(1u << 12); // TRIANGLE
-        if (GetAsyncKeyState('Q')       & 0x8000) pad &= ~(1u << 10); // L1
-        if (GetAsyncKeyState('W')       & 0x8000) pad &= ~(1u << 11); // R1
-        rt.set_pad_buttons(pad);
+        // Keyboard (only while the game window has focus) + gamepads, merged as active-high
+        // PS1 bits, then inverted to the pad's active-low format
+        u16 pressed = gamepad.poll();
+        if (GetForegroundWindow() == hwnd) {
+            struct KeyBind { int vk; u16 bit; };
+            constexpr KeyBind KEYS[] = {
+                {VK_RETURN, pad::START}, {VK_BACK, pad::SELECT},
+                {VK_UP, pad::UP}, {VK_RIGHT, pad::RIGHT}, {VK_DOWN, pad::DOWN}, {VK_LEFT, pad::LEFT},
+                {'Z', pad::CROSS}, {'X', pad::CIRCLE}, {'A', pad::SQUARE}, {'S', pad::TRIANGLE},
+                {'Q', pad::L1}, {'W', pad::R1}, {'E', pad::L2}, {'R', pad::R2},
+            };
+            for (const auto& k : KEYS) {
+                if ((GetAsyncKeyState(k.vk) & 0x8000) != 0) pressed |= k.bit;
+            }
+        }
+        rt.set_pad_buttons(static_cast<u16>(~pressed));
 
         // Stream synthesized PS1 SPU 44.1 kHz Stereo PCM to Windows audio ring buffer
         audio.pump_from_spu(rt.spu());
 
         if (d3d.is_initialized()) {
-            d3d.present_vram(rt.gpu(), host_state.show_full_vram, host_state.widescreen, true);
+            // No vsync: pacing comes from throttle_frame(), not the monitor's refresh rate
+            d3d.present_vram(rt.gpu(), host_state.show_full_vram, host_state.widescreen, false);
         } else {
             u32 fw = 0, fh = 0;
             rt.gpu().export_bgra8888(frame_bgra, fw, fh, host_state.show_full_vram);
@@ -479,8 +585,8 @@ int main(int argc, char** argv) {
                               frame_bgra.data(), &bmi, DIB_RGB_COLORS, SRCCOPY);
                 ReleaseDC(hwnd, hdc);
             }
-            Sleep(14);
         }
+        throttle_frame();
     };
 
     if (host_state.self_demo) {
@@ -498,6 +604,7 @@ int main(int argc, char** argv) {
             present_and_pump();
         }
     }
+    timeEndPeriod(1);
 #endif
     return 0;
 }

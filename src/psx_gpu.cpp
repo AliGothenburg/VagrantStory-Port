@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <fstream>
+#include <utility>
 
 namespace vsport {
 
@@ -76,6 +77,7 @@ void PsxGpu::reset() {
     in_polyline_      = false;
     gpustat_          = 0x1C802000u; // Ready to receive cmd, VRAM->CPU ready, DMA block ready
     texpage_          = 0;
+    texwin_           = 0;
     clip_x1_          = 0;
     clip_y1_          = 0;
     clip_x2_          = 1023;
@@ -172,7 +174,7 @@ void PsxGpu::write_gp1(u32 word) {
         }
         case 0x10: { // Read internal GPU info into GPUREAD
             switch (param & 7u) {
-                case 2: gpuread_latch_ = 0; break;
+                case 2: gpuread_latch_ = texwin_; break;
                 case 3: gpuread_latch_ = static_cast<u32>((clip_x1_ & 0x3FF) | ((clip_y1_ & 0x3FF) << 10)); break;
                 case 4: gpuread_latch_ = static_cast<u32>((clip_x2_ & 0x3FF) | ((clip_y2_ & 0x3FF) << 10)); break;
                 case 5: gpuread_latch_ = static_cast<u32>((draw_off_x_ & 0x7FF) | ((draw_off_y_ & 0x7FF) << 11)); break;
@@ -223,6 +225,14 @@ void PsxGpu::write_gp0(u32 word) {
 }
 
 u16 PsxGpu::sample_texture(u8 u, u8 v, u16 clut_word, u16 texpage_word) const noexcept {
+    // GP0(E2h) texture window: Texcoord = (Texcoord AND NOT(Mask*8)) OR ((Offset AND Mask)*8)
+    const u32 mask_x = (texwin_ & 0x1Fu) * 8u;
+    const u32 mask_y = ((texwin_ >> 5) & 0x1Fu) * 8u;
+    const u32 off_x  = ((texwin_ >> 10) & 0x1Fu) * 8u;
+    const u32 off_y  = ((texwin_ >> 15) & 0x1Fu) * 8u;
+    u = static_cast<u8>((u & ~mask_x) | (off_x & mask_x));
+    v = static_cast<u8>((v & ~mask_y) | (off_y & mask_y));
+
     const u32 tp_x  = (texpage_word & 0x0Fu) * 64u;
     const u32 tp_y  = ((texpage_word >> 4) & 0x01u) * 256u;
     const u32 depth = (texpage_word >> 7) & 0x03u;
@@ -246,8 +256,10 @@ u16 PsxGpu::sample_texture(u8 u, u8 v, u16 clut_word, u16 texpage_word) const no
     return read_vram_pixel(tp_x + u, tp_y + v);
 }
 
-void PsxGpu::rasterize_triangle(const Vertex& v0, const Vertex& v1, const Vertex& v2,
+void PsxGpu::rasterize_triangle(const Vertex& v0, const Vertex& v1_in, const Vertex& v2_in,
                                 bool shaded, bool textured, u16 clut_word, u16 texpage_word, bool semi_trans) {
+    Vertex v1 = v1_in;
+    Vertex v2 = v2_in;
     s32 min_x = std::min({v0.x, v1.x, v2.x});
     s32 max_x = std::max({v0.x, v1.x, v2.x});
     s32 min_y = std::min({v0.y, v1.y, v2.y});
@@ -275,17 +287,30 @@ void PsxGpu::rasterize_triangle(const Vertex& v0, const Vertex& v1, const Vertex
     if (area == 0) {
         return;
     }
+    // Normalize winding so every edge function is >= 0 inside the triangle
+    if (area < 0) {
+        std::swap(v1, v2);
+        area = -area;
+    }
 
-    const s64 sign = (area < 0) ? -1 : 1;
-    area *= sign;
+    // PS1 fill rule: pixels exactly on a right or bottom edge are not drawn (top-left rule).
+    // With this winding (screen y down), an edge a->b is "top or left" when it goes down
+    // (dy > 0) or is horizontal going left (dy == 0 && dx < 0); other edges need w > 0.
+    const auto bias = [](const Vertex& a, const Vertex& b) -> s64 {
+        const s32 dx = b.x - a.x, dy = b.y - a.y;
+        return (dy > 0 || (dy == 0 && dx < 0)) ? 0 : -1;
+    };
+    const s64 bias0 = bias(v1, v2);
+    const s64 bias1 = bias(v2, v0);
+    const s64 bias2 = bias(v0, v1);
 
     for (s32 py = min_y; py <= max_y; ++py) {
         for (s32 px = min_x; px <= max_x; ++px) {
-            const s64 w0 = edge(v1.x, v1.y, v2.x, v2.y, px, py) * sign;
-            const s64 w1 = edge(v2.x, v2.y, v0.x, v0.y, px, py) * sign;
-            const s64 w2 = edge(v0.x, v0.y, v1.x, v1.y, px, py) * sign;
+            const s64 w0 = edge(v1.x, v1.y, v2.x, v2.y, px, py);
+            const s64 w1 = edge(v2.x, v2.y, v0.x, v0.y, px, py);
+            const s64 w2 = edge(v0.x, v0.y, v1.x, v1.y, px, py);
 
-            if (w0 >= 0 && w1 >= 0 && w2 >= 0) {
+            if (w0 + bias0 >= 0 && w1 + bias1 >= 0 && w2 + bias2 >= 0) {
                 u8 r = v0.r, g = v0.g, b = v0.b;
                 if (shaded) {
                     r = static_cast<u8>((w0 * v0.r + w1 * v1.r + w2 * v2.r) / area);
@@ -534,6 +559,10 @@ void PsxGpu::dispatch_gp0_packet() {
         case 0xE5: { // Drawing Offset
             draw_off_x_ = sign_extend_11(w0 & 0x7FFu);
             draw_off_y_ = sign_extend_11((w0 >> 11) & 0x7FFu);
+            break;
+        }
+        case 0xE2: { // Texture Window (mask/offset in 8-texel steps)
+            texwin_ = w0 & 0x000FFFFFu;
             break;
         }
         default:

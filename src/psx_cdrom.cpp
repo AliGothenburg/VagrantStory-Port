@@ -27,6 +27,9 @@ void PsxCdrom::reset() {
     raw_sector_.fill(0);
     data_fifo_.clear();
     data_pos_         = 0;
+    sector_seq_       = 0;
+    fifo_sector_seq_  = 0;
+    bfrd_             = false;
     sectors_read_     = 0;
 }
 
@@ -86,16 +89,21 @@ void PsxCdrom::write_reg8(u32 port_offset, u8 val) {
 
         case 3: // 0x1F801803
             if ((index_ & 1u) == 0) {
-                // Request Register (Index 0 / 2): bit 7 (BFRD) loads data_fifo from current sector
+                // Request Register (Index 0 / 2): bit 7 (BFRD, "want data") transfers the drive's
+                // newest sector into the host data FIFO on its 0 -> 1 transition; writing 1 while it
+                // is already 1 changes nothing, and writing 0 resets the FIFO. libcd clears and sets
+                // BFRD once per sector and then sets it again for each CdGetSector() (header DMA,
+                // then data DMA): a later sector arriving in between must not replace the FIFO.
                 if (index_ == 0) {
-                    if ((val & 0x80u) != 0) {
-                        if (data_pos_ >= data_fifo_.size()) {
-                            load_current_sector_buffer();
-                        }
-                    } else {
+                    const bool want = (val & 0x80u) != 0;
+                    if (want && !bfrd_) {
+                        load_current_sector_buffer();
+                        fifo_sector_seq_ = sector_seq_;
+                    } else if (!want) {
                         data_fifo_.clear();
                         data_pos_ = 0;
                     }
+                    bfrd_ = want;
                 }
             } else {
                 // Interrupt Flag Acknowledge (Index 1 / 3)
@@ -177,11 +185,15 @@ bool PsxCdrom::tick(u64 elapsed_cycles) {
 
     if (reading_ && disc_ != nullptr) {
         // Use exact real-time 2x (225,792 cycles) / 1x (451,584 cycles) cadence during XA-ADPCM streaming,
-        // and fast loading cadence for ordinary file data reads
+        // and fast loading cadence for ordinary file data reads. A fast read still waits until the
+        // CPU has taken the previous data sector (BFRD) or a real sector time has passed, so the
+        // drive never runs ahead of a loader that fetches each sector in several DMA steps.
         const bool xa_streaming = (mode_ & 0x40u) != 0;
-        const u64 sector_period = xa_streaming
-            ? (((mode_ & 0x80u) != 0) ? 225792ull : 451584ull)
-            : (((mode_ & 0x80u) != 0) ? 12000ull  : 24000ull);
+        const u64 real_period   = ((mode_ & 0x80u) != 0) ? 225792ull : 451584ull;
+        const bool prev_fetched = fifo_sector_seq_ == sector_seq_;
+        const u64 sector_period = (xa_streaming || !prev_fetched)
+            ? real_period
+            : (((mode_ & 0x80u) != 0) ? 12000ull : 24000ull);
         read_timer_ += elapsed_cycles;
         if (read_timer_ >= sector_period && pending_irqs_.empty() && irq_flag_ == 0) {
             read_timer_ = 0;
@@ -200,8 +212,15 @@ bool PsxCdrom::tick(u64 elapsed_cycles) {
                 }
                 // Hardware routes XA-ADPCM audio sectors to SPU without raising CPU INT1 DataReady
             } else {
-                // Prepare data buffer immediately and fire INT1(stat_)
-                load_current_sector_buffer();
+                // New data sector in the drive buffer: announce it with INT1(stat_). The host FIFO
+                // keeps the previous sector until the CPU requests the new one with BFRD; code that
+                // leaves BFRD set gets it loaded right away, but only once the previous sector has
+                // been read out completely (never overwrite a FIFO the CPU is still draining).
+                ++sector_seq_;
+                if (bfrd_ && data_pos_ >= data_fifo_.size()) {
+                    load_current_sector_buffer();
+                    fifo_sector_seq_ = sector_seq_;
+                }
                 queue_response(0x01, {stat_}, 0);
                 if (promote_next_irq()) {
                     fire_irq2 = true;
@@ -318,13 +337,31 @@ void PsxCdrom::execute_command(u8 cmd) {
             break;
 
         case 0x11: { // CdlGetlocP (track, index, rel_msf, abs_msf)
-            const u32 cur = reading_ ? read_lba_ : seek_lba_;
-            const u32 abs_f = cur + 150u;
-            queue_response(0x03, {
-                0x01, 0x01,
-                bin_to_bcd(cur / (60u * 75u)), bin_to_bcd((cur / 75u) % 60u), bin_to_bcd(cur % 75u),
-                bin_to_bcd(abs_f / (60u * 75u)), bin_to_bcd((abs_f / 75u) % 60u), bin_to_bcd(abs_f % 75u)
-            }, 800);
+            // The drive reports the Q-subchannel position under the head: while reading that is
+            // the sector most recently delivered (read_lba_ already points at the next one).
+            // Vagrant Story's loader checks this after every sector and re-seeks on a mismatch.
+            // LibCrypt sectors (listed in the disc's .sbi) carry altered Q data with a broken CRC.
+            // The drive drops Q frames that fail the CRC and keeps reporting the last valid
+            // position, so on such a sector GetlocP still shows the previous sector. LibCrypt
+            // detects exactly that "stuck" position; passing the altered Q through instead makes
+            // the check compute a wrong key.
+            const u32 cur = reading_ ? (read_lba_ > 0 ? read_lba_ - 1u : 0u) : read_lba_;
+            std::array<u8, 10> q{};
+            if (disc_ != nullptr) {
+                u32 q_lba = cur;
+                while (q_lba > 0 && disc_->has_subq_override(q_lba)) {
+                    --q_lba;
+                }
+                q = disc_->subchannel_q(q_lba);
+            } else {
+                const u32 abs_f = cur + 150u;
+                q = {0x41u, 0x01u, 0x01u,
+                     bin_to_bcd(cur / (60u * 75u)), bin_to_bcd((cur / 75u) % 60u), bin_to_bcd(cur % 75u),
+                     0x00u,
+                     bin_to_bcd(abs_f / (60u * 75u)), bin_to_bcd((abs_f / 75u) % 60u), bin_to_bcd(abs_f % 75u)};
+            }
+            // GetlocP: track, index, relative MSF, absolute MSF (Q bytes 1..5 and 7..9)
+            queue_response(0x03, {q[1], q[2], q[3], q[4], q[5], q[7], q[8], q[9]}, 800);
             break;
         }
 

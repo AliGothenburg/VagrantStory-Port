@@ -139,12 +139,15 @@ private:
     void write_mmio16(u32 paddr, u16 val);
     void write_mmio32(u32 paddr, u32 val);
 
+    void sio_pad_ack() noexcept;
+    void tick_sio(u64 elapsed_cycles) noexcept;
     void execute_dma(u32 channel);
     void pump_mdec_out_dma();
     void update_dicr_irq();
     void deliver_kernel_event(u32 ev_class, u32 ev_spec);
     void dispatch_bios_irq_events(CpuContext& ctx, u32 ev_class, u32 ev_spec);
     void check_and_enter_interrupt(CpuContext& ctx);
+    void restore_interrupted_context(CpuContext& ctx) noexcept;
     std::string read_cstr(u32 vaddr, u32 max_len = 512);
     std::string format_bios_printf(CpuContext& ctx);
 
@@ -196,6 +199,12 @@ private:
     u8  sio_step_       = 0;
     bool sio_selected_  = false;
     bool sio_is_memcard_ = false;
+    // /ACK timing: delay from TX write to the pad's ACK pulse (~8 bits at SIO_BAUD 0x88 plus the
+    // pad's response time), and the pulse width
+    static constexpr u32 SIO_ACK_DELAY_CYCLES = 1200;
+    static constexpr u32 SIO_ACK_PULSE_CYCLES = 100;
+    u32 sio_ack_delay_  = 0;
+    u32 sio_ack_pulse_  = 0;
 
     u32 dpcr_   = 0x07654321u;
     u32 dicr_   = 0;

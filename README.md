@@ -33,6 +33,20 @@ Araçlar kendi Vagrant Story disk imajınızı (`.cue` + `.bin`) kullanır. Aşa
 $Disc = "C:\Users\anari\Downloads\Minerva_Myrient\Redump\Sony - PlayStation\Vagrant Story (Europe)\Vagrant Story (Europe).cue"
 ```
 
+### Alt kanal verisi (.sbi) — PAL sürümü için gerekli
+
+Avrupa sürümü (SLES-02754) **LibCrypt** korumalıdır: New Game'de birkaç sektörün alt kanal (Q)
+verisini kontrol eder. `.bin` imajı bu veriyi içermez; diskin Redump `.sbi` dosyası olmadan oyun
+New Game'den sonra "NOW LOADING"de kalır. `.sbi` dosyasını `.cue` ile aynı klasöre aynı adla
+koyarsanız otomatik yüklenir; başka bir yerdeyse `--sbi` ile belirtin:
+
+```powershell
+$Sbi = "C:\Users\anari\Downloads\Vagrant Story (Europe)\Vagrant Story (Europe).sbi"
+./build/vs_host.exe --disc $Disc --sbi $Sbi
+```
+
+ABD sürümünde (SLUS-01040) bu koruma yoktur.
+
 > **Not:** `generated_recomp/` diskten üretilen koddur ve `.gitignore` ile depo dışında tutulur
 > (oyunun kodunun birebir çevirisi olduğu için paylaşılmamalıdır). Yeni bir klonda önce `vs_recomp`
 > ile üretin, ardından `./build.ps1` ile derleyin; klasör yoksa `vs_host` AOT modülleri olmadan
@@ -43,6 +57,10 @@ $Disc = "C:\Users\anari\Downloads\Minerva_Myrient\Redump\Sony - PlayStation\Vagr
 1. **Disk İmajını İnceleme ve Overlay Analizi (`vs_inspect`):**
    ```powershell
    ./build/vs_inspect.exe --disc $Disc --extract-dir extracted
+
+   # Çekirdek EXE'yi ya da bir overlay'i yükleme adresinde disassemble etme:
+   ./build/vs_inspect.exe --disc $Disc --disasm 0x80010B14 64
+   ./build/vs_inspect.exe --disc $Disc --prg BATTLE/BATTLE.PRG --disasm 0x800D51D0 40
    ```
 
 2. **Statik C++20 Kod Üretimi (`vs_recomp`):**
@@ -56,9 +74,33 @@ $Disc = "C:\Users\anari\Downloads\Minerva_Myrient\Redump\Sony - PlayStation\Vagr
    ./build/vs_host.exe --self-demo
 
    # Disk imajıyla önyükleme (pencere modunda Native C++20 AOT aktif):
-   ./build/vs_host.exe --disc $Disc
+   ./build/vs_host.exe --disc $Disc --sbi $Sbi
+
+   # Headless çalıştırma sonunda PS1 RAM'ini (2 MB) dosyaya dökme (hata ayıklama):
+   ./build/vs_host.exe --disc $Disc --sbi $Sbi --headless --cycles 900000000 --dump-ram ram.bin
+
+   # Headless modda belirli VBlank karelerinde tuş basma (BUTON@VBLANK[:KARE], virgülle ayrılır):
+   ./build/vs_host.exe --disc $Disc --headless --cycles 470000000 --press START@370,START@430,DOWN@650:4 --dump-display menu.ppm
 
    # Headless performans, 24-bit aktif ekran / VRAM ve 44.1 kHz WAV ses çıktısı testi:
    ./build/vs_host.exe --disc $Disc --headless --cycles 1150000000 --dump-display fmv.ppm --dump-wav spu.wav
    ```
-   *Pencere Kısayolları:* `F2` Tam 1024×512 VRAM | `F3` 16:9 Geniş Ekran GTE | `F4` HLSL Shader Kipi (Keskin / Bilinear / Trinitron CRT) | `M` Ses Aç/Kapat | `F12` PPM Kaydet | `ESC` Çıkış
+   Oyun, seçtiği video kipine göre gerçek zamanlı hızda (PAL 50 Hz / NTSC 60 Hz) çalışır.
+
+   **Kontroller:** Klavye ve gamepad birlikte kullanılabilir; kontrolcü oyun açıkken de takılabilir.
+   Xbox ve XInput uyumlu kontrolcüler XInput ile, DualShock 4 / DualSense ve diğer genel
+   gamepad'ler DirectInput ile okunur. Sol analog çubuk yön tuşu gibi davranır.
+
+   | PS1 | Klavye | Xbox (XInput) | DualShock 4 / DualSense |
+   |---|---|---|---|
+   | Yön | Ok tuşları | D-pad / sol çubuk | D-pad / sol çubuk |
+   | × | `Z` | A | × |
+   | ○ | `X` | B | ○ |
+   | □ | `A` | X | □ |
+   | △ | `S` | Y | △ |
+   | L1 / R1 | `Q` / `W` | LB / RB | L1 / R1 |
+   | L2 / R2 | `E` / `R` | LT / RT | L2 / R2 |
+   | START | `Enter` | Menu (Start) | Options |
+   | SELECT | `Backspace` | View (Back) | Share / Create |
+
+   *Pencere Kısayolları:* `Tab` (basılı tut) Hızlı ileri | `F2` Tam 1024×512 VRAM | `F3` 16:9 Geniş Ekran GTE | `F4` HLSL Shader Kipi (Keskin / Bilinear / Trinitron CRT) | `M` Ses Aç/Kapat | `F12` PPM Kaydet | `ESC` Çıkış

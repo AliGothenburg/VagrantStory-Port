@@ -4,6 +4,7 @@
 #include <array>
 #include <cctype>
 #include <cstring>
+#include <iterator>
 #include <sstream>
 
 namespace vsport {
@@ -98,6 +99,8 @@ bool DiscImage::open(const std::filesystem::path& path, std::string* err_out) {
     stream_.close();
     entries_.clear();
     volume_id_.clear();
+    subq_overrides_.clear();
+    sbi_path_.clear();
     track_pregap_offset_ = 0;
 
     std::string ext = path.extension().string();
@@ -129,7 +132,92 @@ bool DiscImage::open(const std::filesystem::path& path, std::string* err_out) {
         return false;
     }
 
-    return parse_iso9660(err_out);
+    if (!parse_iso9660(err_out)) {
+        return false;
+    }
+
+    // Pick up "<name>.sbi" next to the .cue or the .bin (Redump naming), if present
+    for (const auto& base : {path, bin_path_}) {
+        auto candidate = base;
+        candidate.replace_extension(".sbi");
+        std::error_code ec;
+        if (std::filesystem::exists(candidate, ec) && load_sbi(candidate, nullptr)) {
+            break;
+        }
+    }
+    return true;
+}
+
+namespace {
+
+std::array<u8, 3> lba_to_bcd_msf(u32 frames) noexcept {
+    const auto bcd = [](u32 v) { return static_cast<u8>(((v / 10u) << 4) | (v % 10u)); };
+    return {bcd(frames / (60u * 75u)), bcd((frames / 75u) % 60u), bcd(frames % 75u)};
+}
+
+std::array<u8, 10> regular_subchannel_q(u32 lba) noexcept {
+    // Mode 1 Q for a data track: ctrl 4 (data) / adr 1 (position), track 01, index 01,
+    // relative time from the track start (= LBA), absolute time (LBA + 2 s pregap)
+    const auto rel = lba_to_bcd_msf(lba);
+    const auto abs = lba_to_bcd_msf(lba + 150u);
+    return {0x41u, 0x01u, 0x01u, rel[0], rel[1], rel[2], 0x00u, abs[0], abs[1], abs[2]};
+}
+
+u32 bcd_msf_to_lba(const u8* msf) noexcept {
+    const auto bin = [](u8 b) { return static_cast<u32>((b >> 4) * 10u + (b & 0x0Fu)); };
+    const u32 frames = (bin(msf[0]) * 60u + bin(msf[1])) * 75u + bin(msf[2]);
+    return frames >= 150u ? frames - 150u : 0u;
+}
+
+} // namespace
+
+bool DiscImage::load_sbi(const std::filesystem::path& path, std::string* err_out) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in.is_open()) {
+        if (err_out) *err_out = "SBI dosyasi acilamadi: " + path.string();
+        return false;
+    }
+    const std::vector<u8> data((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    if (data.size() < 4 || std::memcmp(data.data(), "SBI\0", 4) != 0) {
+        if (err_out) *err_out = "Gecersiz SBI imzasi ('SBI\\0' bekleniyordu): " + path.string();
+        return false;
+    }
+
+    // Records: absolute MSF (3 bytes BCD) + type + payload
+    //   type 1: full 10-byte Q (no CRC); type 2: relative MSF (3 bytes); type 3: absolute MSF (3 bytes)
+    std::unordered_map<u32, std::array<u8, 10>> parsed;
+    std::size_t pos = 4;
+    while (pos + 4 <= data.size()) {
+        const u32 lba  = bcd_msf_to_lba(&data[pos]);
+        const u8  type = data[pos + 3];
+        const std::size_t len = (type == 1u) ? 10u : (type == 2u || type == 3u) ? 3u : 0u;
+        if (len == 0 || pos + 4 + len > data.size()) {
+            if (err_out) *err_out = "Bozuk SBI kaydi (konum " + std::to_string(pos) + "): " + path.string();
+            return false;
+        }
+        auto q = parsed.contains(lba) ? parsed[lba] : regular_subchannel_q(lba);
+        const u8* payload = &data[pos + 4];
+        if (type == 1u) {
+            std::memcpy(q.data(), payload, 10);
+        } else if (type == 2u) {
+            std::memcpy(&q[3], payload, 3);
+        } else {
+            std::memcpy(&q[7], payload, 3);
+        }
+        parsed[lba] = q;
+        pos += 4 + len;
+    }
+
+    subq_overrides_ = std::move(parsed);
+    sbi_path_       = path;
+    return true;
+}
+
+std::array<u8, 10> DiscImage::subchannel_q(u32 lba) const {
+    if (const auto it = subq_overrides_.find(lba); it != subq_overrides_.end()) {
+        return it->second;
+    }
+    return regular_subchannel_q(lba);
 }
 
 bool DiscImage::detect_geometry(std::string* err_out) {

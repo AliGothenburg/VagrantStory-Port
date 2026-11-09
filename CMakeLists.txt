@@ -41,6 +41,7 @@ add_executable(vs_host
     tools/vs_host.cpp
     src/d3d11_renderer.cpp
     src/win32_audio.cpp
+    src/win32_input.cpp
 )
 target_link_libraries(vs_host PRIVATE vsport_core)
 
@@ -55,7 +56,7 @@ if(VSPORT_LINK_AOT AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated_recomp/vs_a
 endif()
 
 if(WIN32)
-    target_link_libraries(vs_host PRIVATE user32 gdi32 d3d11 dxgi d3dcompiler winmm)
+    target_link_libraries(vs_host PRIVATE user32 gdi32 d3d11 dxgi d3dcompiler winmm xinput dinput8 dxguid)
 endif()
 
 enable_testing()

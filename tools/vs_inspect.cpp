@@ -53,6 +53,7 @@ int main(int argc, char** argv) {
     std::filesystem::path extract_dir;
     u32 disasm_addr  = 0;
     u32 disasm_count = 32;
+    std::string disasm_prg;
 
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
@@ -65,6 +66,8 @@ int main(int argc, char** argv) {
             if (i + 1 < argc && argv[i + 1][0] != '-') {
                 disasm_count = static_cast<u32>(std::strtoul(argv[++i], nullptr, 0));
             }
+        } else if (arg == "--prg" && i + 1 < argc) {
+            disasm_prg = argv[++i];
         } else if (disc_path.empty() && arg[0] != '-') {
             disc_path = arg;
         }
@@ -109,17 +112,28 @@ int main(int argc, char** argv) {
             std::printf("Kesfedilen Fonksiyon   : %zu adet\n\n", funcs.size());
 
             if (disasm_addr != 0) {
+                // --prg <ISO path>: disassemble that overlay at its load address instead of the core EXE
+                std::vector<u8> code = exe.payload;
+                u32 base_k = to_kseg0(exe.header.t_addr);
+                if (!disasm_prg.empty()) {
+                    code = disc.extract_file(disasm_prg);
+                    const auto analysis = analyze_vs_prg(disasm_prg, code);
+                    if (code.empty() || analysis.inferred_base_addr == 0) {
+                        std::cerr << "[HATA] Overlay bulunamadi veya yukleme adresi cozulemedi: " << disasm_prg << "\n";
+                        return 1;
+                    }
+                    base_k = to_kseg0(analysis.inferred_base_addr);
+                }
                 const u32 start_k = to_kseg0(disasm_addr);
-                const u32 base_k  = to_kseg0(exe.header.t_addr);
                 std::printf("--- Disassembly @ 0x%08X (%u talimat) ---\n", start_k, disasm_count);
                 for (u32 k = 0; k < disasm_count; ++k) {
                     const u32 cur = start_k + k * 4u;
-                    if (cur < base_k || (cur - base_k + 4u) > exe.payload.size()) break;
+                    if (cur < base_k || (cur - base_k + 4u) > code.size()) break;
                     const u32 off = cur - base_k;
-                    const u32 w   = static_cast<u32>(exe.payload[off]) |
-                                    (static_cast<u32>(exe.payload[off + 1]) << 8) |
-                                    (static_cast<u32>(exe.payload[off + 2]) << 16) |
-                                    (static_cast<u32>(exe.payload[off + 3]) << 24);
+                    const u32 w   = static_cast<u32>(code[off]) |
+                                    (static_cast<u32>(code[off + 1]) << 8) |
+                                    (static_cast<u32>(code[off + 2]) << 16) |
+                                    (static_cast<u32>(code[off + 3]) << 24);
                     const auto di = decode_mips(w);
                     std::printf("  0x%08X: [%08X]  %s\n", cur, w, format_mips(cur, di).c_str());
                 }

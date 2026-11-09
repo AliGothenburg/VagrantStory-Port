@@ -2,6 +2,7 @@
 #include "vsport/cfg_lifter.hpp"
 #include "vsport/gte.hpp"
 #include "vsport/mips_decoder.hpp"
+#include "vsport/pad_mapping.hpp"
 #include "vsport/psx_exe.hpp"
 #include "vsport/psx_gpu.hpp"
 #include "vsport/runtime.hpp"
@@ -9,6 +10,8 @@
 #include <cassert>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <vector>
 
@@ -482,6 +485,172 @@ void test_dicr_byte_mmio_masking_and_ack() {
     CHECK((rt.read32(0x1F8010F4u) & 0x88000000u) == 0u, "8-bit write to DICR+3 clears DMA3 flag and master bit 31");
 }
 
+// GP0(E2h) texture window must wrap texture coordinates (Vagrant Story dialog balloons use
+// E2000318: a 64x64 window), and polygons must not draw their right/bottom edges.
+void test_gpu_texture_window_and_fill_rule() {
+    PsxGpu gpu;
+    gpu.write_vram_pixel(8, 0, 0x001Fu);  // Texel at u=8 (red)
+    gpu.write_gp0(0xE1000100u);           // Texpage (0,0), 15bpp direct
+    gpu.write_gp0(0xE2000018u);           // Texture window: mask X = 0x18 (*8 = 0xC0)
+
+    // 1x1 raw textured sprite at (100,100) sampling u=72 -> windowed to u = 72 & ~0xC0 = 8
+    gpu.write_gp0(0x6D000000u);
+    gpu.write_gp0((100u << 16) | 100u);
+    gpu.write_gp0(72u);
+    CHECK(gpu.read_vram_pixel(100, 100) == 0x001Fu, "Texture window wraps u=72 to u=8");
+
+    gpu.write_gp0(0xE2000000u);           // Window off: u=72 hits an empty (transparent) texel
+    gpu.write_gp0(0x6D000000u);
+    gpu.write_gp0((101u << 16) | 101u);
+    gpu.write_gp0(72u);
+    CHECK(gpu.read_vram_pixel(101, 101) == 0u, "Without a texture window u=72 is not wrapped");
+
+    // Flat white quad with corners (10,10)-(14,14) covers exactly x,y in [10,14): 16 pixels
+    gpu.write_gp0(0x28FFFFFFu);
+    gpu.write_gp0((10u << 16) | 10u);
+    gpu.write_gp0((10u << 16) | 14u);
+    gpu.write_gp0((14u << 16) | 10u);
+    gpu.write_gp0((14u << 16) | 14u);
+    u32 covered = 0;
+    bool edge_drawn = false;
+    for (u32 y = 8; y <= 16; ++y) {
+        for (u32 x = 8; x <= 16; ++x) {
+            if (gpu.read_vram_pixel(x, y) != 0) {
+                ++covered;
+                if (x >= 14 || y >= 14 || x < 10 || y < 10) edge_drawn = true;
+            }
+        }
+    }
+    CHECK(covered == 16u, "Quad (10,10)-(14,14) draws exactly 4x4 pixels (no seam overlap)");
+    CHECK(!edge_drawn, "Right/bottom polygon edges are excluded (top-left fill rule)");
+}
+
+// The VBlank period must follow the video mode the game selects (Vagrant Story Europe is PAL).
+void test_vblank_period_follows_video_mode() {
+    PsxRuntime rt;
+    CpuContext ctx{};
+    rt.write32(0x1F801814u, 0x08000009u);  // GP1(08h): 320 wide, PAL
+    CHECK(rt.gpu().is_pal(), "GP1(08h) bit 3 selects PAL");
+    rt.tick_hardware(ctx, 600'000ull);
+    CHECK(rt.vblank_count() == 0u, "PAL: no VBlank after 600k cycles (period 677,376)");
+    rt.tick_hardware(ctx, 100'000ull);
+    CHECK(rt.vblank_count() == 1u, "PAL: first VBlank after 677,376 cycles");
+
+    PsxRuntime ntsc;
+    CpuContext nctx{};
+    ntsc.write32(0x1F801814u, 0x08000001u); // GP1(08h): 320 wide, NTSC
+    ntsc.tick_hardware(nctx, 600'000ull);
+    CHECK(ntsc.vblank_count() == 1u, "NTSC: VBlank after 564,480 cycles");
+}
+
+// SIO0 digital pad read the way Vagrant Story's driver does it: after each TX byte it clears
+// IRQ7, waits for /ACK (SIO_STAT bit 7) to read 0, then waits for IRQ7 from the delayed ACK pulse.
+void test_sio_pad_read_with_delayed_ack() {
+    PsxRuntime rt;
+    CpuContext ctx{};
+    rt.set_pad_buttons(static_cast<u16>(~(vsport::pad::CROSS | vsport::pad::START)));
+    rt.write16(0x1F80104Au, 0x1003u); // TX enable, /JOY1 select, ACK IRQ enable
+
+    const auto exchange = [&](u8 tx, bool expect_ack) -> u8 {
+        rt.write8(0x1F801040u, tx);
+        rt.write32(0x1F801070u, ~(1u << 7));                   // Driver clears IRQ7 after TX
+        CHECK((rt.read16(0x1F801044u) & 0x0080u) == 0u, "/ACK not asserted right after TX");
+        rt.tick_hardware(ctx, 2000ull);                        // Byte transfer + pad response
+        const bool irq7 = (rt.read32(0x1F801070u) & (1u << 7)) != 0;
+        CHECK(irq7 == expect_ack, "IRQ7 follows the pad's delayed /ACK");
+        if (expect_ack) {
+            CHECK((rt.read16(0x1F801044u) & 0x0200u) != 0u, "SIO_STAT bit 9 (IRQ) set on /ACK");
+            rt.write16(0x1F80104Au, 0x1013u);                  // Acknowledge SIO IRQ
+            rt.tick_hardware(ctx, 500ull);                     // /ACK pulse ends
+            CHECK((rt.read16(0x1F801044u) & 0x0080u) == 0u, "/ACK pulse released");
+        }
+        return rt.read8(0x1F801040u);
+    };
+
+    CHECK(exchange(0x01u, true) == 0xFFu, "Pad select byte");
+    CHECK(exchange(0x42u, true) == 0x41u, "Digital pad ID low (0x41)");
+    CHECK(exchange(0x00u, true) == 0x5Au, "Pad ready marker 0x5A");
+    const u8 lo = exchange(0x00u, true);
+    const u8 hi = exchange(0x00u, false);                       // Last byte has no /ACK
+    const u16 buttons = static_cast<u16>(lo | (hi << 8));
+    CHECK(buttons == static_cast<u16>(~(vsport::pad::CROSS | vsport::pad::START)), "Pad returns the host button state");
+}
+
+// Redump .sbi subchannel overrides (LibCrypt): altered Q data replaces the regular position
+void test_sbi_subchannel_overrides() {
+    const auto path = std::filesystem::temp_directory_path() / "vsport_test.sbi";
+    {
+        const u8 bytes[] = {
+            'S', 'B', 'I', 0,
+            // 03:14:29 type 1: full altered Q (relative 03:12:09, absolute 03:14:2D)
+            0x03, 0x14, 0x29, 0x01, 0x41, 0x01, 0x01, 0x03, 0x12, 0x09, 0x00, 0x03, 0x14, 0x2D,
+            // 03:14:34 type 3: only the absolute MSF is altered
+            0x03, 0x14, 0x34, 0x03, 0x03, 0x04, 0x34,
+        };
+        std::ofstream out(path, std::ios::binary);
+        out.write(reinterpret_cast<const char*>(bytes), sizeof(bytes));
+    }
+
+    DiscImage disc;
+    std::string err;
+    CHECK(disc.load_sbi(path, &err), "SBI loads");
+    CHECK(disc.subq_override_count() == 2u, "SBI has 2 sectors");
+
+    const u32 lba1 = (3u * 60u + 14u) * 75u + 29u - 150u;
+    const auto q1 = disc.subchannel_q(lba1);
+    CHECK(q1[3] == 0x03 && q1[4] == 0x12 && q1[5] == 0x09 && q1[9] == 0x2D, "Type 1 record replaces the whole Q");
+
+    const u32 lba2 = (3u * 60u + 14u) * 75u + 34u - 150u;
+    const auto q2 = disc.subchannel_q(lba2);
+    CHECK(q2[7] == 0x03 && q2[8] == 0x04 && q2[9] == 0x34, "Type 3 record replaces the absolute MSF");
+    CHECK(q2[3] == 0x03 && q2[4] == 0x12 && q2[5] == 0x34, "Type 3 record keeps the regular relative MSF");
+
+    const auto q_plain = disc.subchannel_q(lba1 + 1u); // 03:14:30 absolute -> relative 03:12:30
+    CHECK(q_plain[0] == 0x41 && q_plain[3] == 0x03 && q_plain[4] == 0x12 && q_plain[5] == 0x30 &&
+              q_plain[7] == 0x03 && q_plain[8] == 0x14 && q_plain[9] == 0x30,
+          "Sectors without an SBI record report their regular position");
+
+    std::filesystem::remove(path);
+    std::ofstream bad(path, std::ios::binary);
+    bad << "NOPE";
+    bad.close();
+    CHECK(!disc.load_sbi(path, &err), "Files without the SBI signature are rejected");
+    std::filesystem::remove(path);
+}
+
+void test_gamepad_mapping() {
+    using namespace vsport::pad;
+
+    // XInput: face buttons by position, shoulders, triggers, Start/Back
+    CHECK(map_xinput(xi::A, 0, 0, 0, 0) == CROSS, "XInput A -> Cross");
+    CHECK(map_xinput(xi::B | xi::X | xi::Y, 0, 0, 0, 0) == (CIRCLE | SQUARE | TRIANGLE), "XInput B/X/Y -> Circle/Square/Triangle");
+    CHECK(map_xinput(xi::LEFT_SHOULDER | xi::RIGHT_SHOULDER, 0, 0, 0, 0) == (L1 | R1), "XInput LB/RB -> L1/R1");
+    CHECK(map_xinput(0, 255, 63, 0, 0) == L2, "XInput triggers use a threshold (LT pressed, RT light touch ignored)");
+    CHECK(map_xinput(xi::START | xi::BACK, 0, 0, 0, 0) == (START | SELECT), "XInput Start/Back -> Start/Select");
+    CHECK(map_xinput(xi::DPAD_UP | xi::DPAD_LEFT, 0, 0, 0, 0) == (UP | LEFT), "XInput D-pad");
+    // Left stick acts as D-pad with a deadzone; XInput +Y is up
+    CHECK(map_xinput(0, 0, 0, 0, 30000) == UP, "XInput stick up -> Up");
+    CHECK(map_xinput(0, 0, 0, -30000, -30000) == (LEFT | DOWN), "XInput stick down-left -> Down+Left");
+    CHECK(map_xinput(0, 0, 0, 8000, -8000) == 0, "XInput stick inside deadzone is ignored");
+
+    // DirectInput POV hat (hundredths of a degree, clockwise from up)
+    CHECK(map_pov_hat(0xFFFFFFFFu) == 0, "POV centered");
+    CHECK(map_pov_hat(0) == UP, "POV 0 -> Up");
+    CHECK(map_pov_hat(4500) == (UP | RIGHT), "POV 45 -> Up+Right");
+    CHECK(map_pov_hat(18000) == DOWN, "POV 180 -> Down");
+    CHECK(map_pov_hat(27000) == LEFT, "POV 270 -> Left");
+
+    // DirectInput DualShock 4 / DualSense button order
+    u8 buttons[128]{};
+    buttons[1] = 0x80; // Cross
+    buttons[9] = 0x80; // Options -> Start
+    buttons[6] = 0x80; // L2
+    CHECK(map_dinput(0xFFFFFFFFu, 0, 0, buttons, sizeof(buttons)) == (CROSS | START | L2), "DInput DS4 order: Cross/Options/L2");
+    u8 none[128]{};
+    CHECK(map_dinput(0xFFFFFFFFu, 0, -900, none, sizeof(none)) == UP, "DInput stick: -Y is up");
+    CHECK(map_dinput(0xFFFFFFFFu, 300, 300, none, sizeof(none)) == 0, "DInput stick inside deadzone is ignored");
+}
+
 } // namespace
 
 int main() {
@@ -497,6 +666,11 @@ int main() {
     test_spu_dma4_adpcm_and_adsr();
     test_mdec_dma0_dma1_rgb24_and_rgb15();
     test_dicr_byte_mmio_masking_and_ack();
+    test_gpu_texture_window_and_fill_rule();
+    test_vblank_period_follows_video_mode();
+    test_gamepad_mapping();
+    test_sio_pad_read_with_delayed_ack();
+    test_sbi_subchannel_overrides();
 
     if (g_failures == 0) {
         std::cout << "[PASS] Tum vsport cekirdek testleri basariyla gecti!\n";

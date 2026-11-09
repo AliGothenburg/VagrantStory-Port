@@ -2,11 +2,13 @@
 
 #include "vsport/types.hpp"
 
+#include <array>
 #include <filesystem>
 #include <fstream>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 namespace vsport {
@@ -63,6 +65,21 @@ public:
     // Parses SYSTEM.CNF from the disc
     [[nodiscard]] std::optional<SystemCnfInfo> parse_system_cnf() const;
 
+    // Subchannel Q data. A .bin image stores only sector data; protections such as LibCrypt
+    // (Vagrant Story PAL) rely on deliberately altered Q data on the original disc. A Redump
+    // .sbi file records those sectors. open() loads "<image name>.sbi" automatically when it
+    // sits next to the .cue/.bin; load_sbi() loads one from anywhere.
+    bool load_sbi(const std::filesystem::path& path, std::string* err_out = nullptr);
+    [[nodiscard]] std::size_t subq_override_count() const noexcept { return subq_overrides_.size(); }
+    // True for sectors listed in the .sbi: their Q data was altered on the disc and fails the
+    // Q CRC, so a real drive ignores it (see PsxCdrom GetlocP)
+    [[nodiscard]] bool has_subq_override(u32 lba) const noexcept { return subq_overrides_.contains(lba); }
+    [[nodiscard]] const std::filesystem::path& sbi_path() const noexcept { return sbi_path_; }
+
+    // 10-byte Q subchannel for a sector (BCD, no CRC): ctrl/adr, track, index, relative MSF,
+    // zero, absolute MSF. Uses the .sbi data when present, else the regular track-1 position.
+    [[nodiscard]] std::array<u8, 10> subchannel_q(u32 lba) const;
+
 private:
     bool detect_geometry(std::string* err_out);
     bool parse_iso9660(std::string* err_out);
@@ -78,6 +95,8 @@ private:
     u32 track_pregap_offset_ = 0; // Byte offset to LBA 0 in track file
     std::string volume_id_;
     std::vector<IsoFileEntry> entries_;
+    std::unordered_map<u32, std::array<u8, 10>> subq_overrides_; // LBA -> Q from .sbi
+    std::filesystem::path sbi_path_;
 };
 
 } // namespace vsport

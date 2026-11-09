@@ -72,8 +72,11 @@ private:
     bool reading_          = false;
     u64 read_timer_        = 0;
 
-    std::array<u8, 2352> raw_sector_{};
-    std::vector<u8> data_fifo_;
+    std::array<u8, 2352> raw_sector_{};    // Drive sector buffer (newest sector read)
+    std::vector<u8> data_fifo_;            // Host data FIFO (filled by BFRD)
+    u32 sector_seq_      = 0;              // Data sectors announced with INT1
+    u32 fifo_sector_seq_ = 0;              // Sector sequence currently loaded into data_fifo_
+    bool bfrd_           = false;          // Request register bit 7 (Want Data) as last written
     std::size_t data_pos_  = 0;
     u32 sectors_read_      = 0;
     u32 logged_cmds_       = 0;

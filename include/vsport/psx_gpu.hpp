@@ -37,6 +37,8 @@ public:
     [[nodiscard]] u32 display_width() const noexcept { return disp_width_; }
     [[nodiscard]] u32 display_height() const noexcept { return disp_height_; }
     [[nodiscard]] bool is_24bit_display() const noexcept { return (gpustat_ & (1u << 21)) != 0; }
+    // GP1(08h) bit 3 -> GPUSTAT bit 20: 0 = NTSC (60 Hz), 1 = PAL (50 Hz)
+    [[nodiscard]] bool is_pal() const noexcept { return (gpustat_ & (1u << 20)) != 0; }
 
     // Converts either the active display region or full 1024x512 VRAM into BGRA8888 (for Win32 GDI)
     void export_bgra8888(std::vector<u32>& out_pixels, u32& out_w, u32& out_h, bool full_vram = false) const;
@@ -81,6 +83,7 @@ private:
     // Drawing environment registers
     u32 gpustat_     = 0x14802000u; // Ready for cmd, DMA, VRAM, interlaced field bit
     u16 texpage_     = 0;
+    u32 texwin_      = 0; // GP0(E2h) texture window: mask X/Y, offset X/Y (5 bits each)
     s32 clip_x1_     = 0, clip_y1_ = 0;
     s32 clip_x2_     = 1023, clip_y2_ = 511;
     s32 draw_off_x_  = 0, draw_off_y_ = 0;

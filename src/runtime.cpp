@@ -33,6 +33,12 @@ void store_le32(u8* p, u32 v) noexcept {
 
 } // namespace
 
+struct TraceEntry { u32 pc, ra, sp; };
+static TraceEntry g_trace_ring[64];
+static u32 g_trace_pos = 0;
+static TraceEntry g_call_ring[64];
+static u32 g_call_pos = 0;
+
 PsxRuntime::PsxRuntime(u32 ram_size)
     : ram_(ram_size, 0), bios_(PSX_BIOS_SIZE, 0) {
     reset();
@@ -64,6 +70,8 @@ void PsxRuntime::reset() {
     sio_step_        = 0;
     sio_selected_    = false;
     sio_is_memcard_  = false;
+    sio_ack_delay_   = 0;
+    sio_ack_pulse_   = 0;
 
     dpcr_   = 0x07654321u;
     dicr_   = 0;
@@ -191,13 +199,8 @@ u16 PsxRuntime::read16(u32 vaddr) {
     return 0;
 }
 
-struct TraceEntry { u32 pc, ra, sp; };
-static TraceEntry g_trace_ring[64];
-static u32 g_trace_pos = 0;
 static TraceEntry g_watch[16];
 static u32 g_watch_pos = 0;
-static TraceEntry g_call_ring[64];
-static u32 g_call_pos = 0;
 
 u32 PsxRuntime::read32(u32 vaddr) {
     const u32 paddr = mask_psx_addr(vaddr);
@@ -315,6 +318,7 @@ void PsxRuntime::exec_swr(u32 vaddr, u32 cur_rt) {
     write32(base, merged);
 }
 
+
 u8 PsxRuntime::read_mmio8(u32 paddr) {
     // CD-ROM 8-bit ports 0x1F801800..0x1F801803
     if (paddr >= 0x1F801800u && paddr <= 0x1F801803u) {
@@ -406,6 +410,43 @@ u32 PsxRuntime::read_mmio32(u32 paddr) {
     }
 }
 
+// A byte was shifted to the pad and the pad will answer with an /ACK pulse. On hardware the pulse
+// arrives after the byte transfer (~8 bit times at the programmed baud rate), not at the TX write.
+// Vagrant Story's pad driver depends on that ordering: right after the TX write it clears IRQ7 in
+// I_STAT, waits for SIO_STAT bit 7 (/ACK level) to read 0, and then waits for IRQ7 to fire.
+void PsxRuntime::sio_pad_ack() noexcept {
+    sio_stat_ |= 0x0002u;   // RX FIFO not empty (reply byte already latched)
+    sio_stat_ &= ~0x0080u;  // /ACK not asserted yet
+    sio_ack_delay_ = SIO_ACK_DELAY_CYCLES;
+}
+
+void PsxRuntime::tick_sio(u64 elapsed_cycles) noexcept {
+    if (sio_ack_delay_ != 0) {
+        if (elapsed_cycles < sio_ack_delay_) {
+            sio_ack_delay_ -= static_cast<u32>(elapsed_cycles);
+            return;
+        }
+        // /ACK pulse starts: level bit 7, and with the ACK interrupt enabled (SIO_CTRL bit 12)
+        // the SIO IRQ flag (SIO_STAT bit 9) plus IRQ7 in I_STAT
+        sio_ack_delay_ = 0;
+        sio_ack_pulse_ = SIO_ACK_PULSE_CYCLES;
+        sio_stat_ |= 0x0080u;
+        if ((sio_ctrl_ & 0x1000u) != 0) {
+            sio_stat_ |= 0x0200u;
+            i_stat_ |= (1u << 7);
+        }
+        return;
+    }
+    if (sio_ack_pulse_ != 0) {
+        if (elapsed_cycles < sio_ack_pulse_) {
+            sio_ack_pulse_ -= static_cast<u32>(elapsed_cycles);
+        } else {
+            sio_ack_pulse_ = 0;
+            sio_stat_ &= ~0x0080u; // /ACK released
+        }
+    }
+}
+
 void PsxRuntime::write_mmio8(u32 paddr, u8 val) {
     if (paddr >= 0x1F801800u && paddr <= 0x1F801803u) {
         cdrom_.write_reg8(paddr - 0x1F801800u, val);
@@ -431,8 +472,7 @@ void PsxRuntime::write_mmio8(u32 paddr, u8 val) {
                     sio_is_memcard_ = false;
                     sio_rx_byte_    = 0xFFu;
                     sio_step_       = 1;
-                    sio_stat_ |= 0x0082u;
-                    if ((sio_ctrl_ & 0x1000u) != 0) i_stat_ |= (1u << 7);
+                    sio_pad_ack();
                 } else {
                     sio_is_memcard_ = true;
                     sio_rx_byte_    = 0xFFu;
@@ -443,8 +483,7 @@ void PsxRuntime::write_mmio8(u32 paddr, u8 val) {
                 if (val == 0x42u && !sio_is_memcard_) {
                     sio_rx_byte_ = 0x41u; // Digital Pad ID low (0x5A41)
                     sio_step_    = 2;
-                    sio_stat_ |= 0x0082u;
-                    if ((sio_ctrl_ & 0x1000u) != 0) i_stat_ |= (1u << 7);
+                    sio_pad_ack();
                 } else {
                     sio_rx_byte_ = 0xFFu;
                     sio_step_    = 0;
@@ -454,14 +493,12 @@ void PsxRuntime::write_mmio8(u32 paddr, u8 val) {
             case 2:
                 sio_rx_byte_ = 0x5Au; // Ready marker
                 sio_step_    = 3;
-                sio_stat_ |= 0x0082u;
-                if ((sio_ctrl_ & 0x1000u) != 0) i_stat_ |= (1u << 7);
+                sio_pad_ack();
                 break;
             case 3:
                 sio_rx_byte_ = static_cast<u8>(pad_buttons_ & 0xFFu);
                 sio_step_    = 4;
-                sio_stat_ |= 0x0082u;
-                if ((sio_ctrl_ & 0x1000u) != 0) i_stat_ |= (1u << 7);
+                sio_pad_ack();
                 break;
             case 4:
             default:
@@ -550,9 +587,11 @@ void PsxRuntime::write_mmio16(u32 paddr, u16 val) {
         case 0x1F80104Au:
             sio_ctrl_ = val;
             if ((val & 0x0040u) != 0) { // Reset
-                sio_stat_     = 0x0005u;
-                sio_step_     = 0;
-                sio_selected_ = false;
+                sio_stat_      = 0x0005u;
+                sio_step_      = 0;
+                sio_selected_  = false;
+                sio_ack_delay_ = 0;
+                sio_ack_pulse_ = 0;
             }
             if ((val & 0x0010u) != 0) { // Ack IRQ
                 sio_stat_ &= ~0x0200u;
@@ -563,8 +602,9 @@ void PsxRuntime::write_mmio16(u32 paddr, u16 val) {
                     sio_step_     = 0;
                 }
             } else {
-                sio_selected_ = false;
-                sio_step_     = 0;
+                sio_selected_  = false;
+                sio_step_      = 0;
+                sio_ack_delay_ = 0; // Pad deselected: no /ACK will follow
             }
             return;
         case 0x1F80104Eu: sio_baud_ = val; return;
@@ -910,9 +950,10 @@ void PsxRuntime::tick_hardware(CpuContext& ctx, u64 elapsed_cycles) {
         }
     }
 
-    // 2. VBlank IRQ0 (~677,376 cycles @ 50Hz PAL / ~564,480 @ 60Hz NTSC)
+    // 2. VBlank IRQ0 (~677,376 cycles @ 50Hz PAL / ~564,480 @ 60Hz NTSC), following the video
+    //    mode the game programmed via GP1(08h)
     vblank_accum_ += elapsed_cycles;
-    constexpr u64 VBLANK_PERIOD = 564'480ull;
+    const u64 VBLANK_PERIOD = gpu_.is_pal() ? 677'376ull : 564'480ull;
     if (vblank_accum_ >= VBLANK_PERIOD) {
         vblank_accum_ -= VBLANK_PERIOD;
         ++vblank_frames_;
@@ -923,6 +964,9 @@ void PsxRuntime::tick_hardware(CpuContext& ctx, u64 elapsed_cycles) {
             on_vblank_();
         }
     }
+
+    // 2b. SIO0 pad /ACK pulse timing (IRQ7)
+    tick_sio(elapsed_cycles);
 
     // 3. CD-ROM State Machine & IRQ2
     if (cdrom_.tick(elapsed_cycles)) {
@@ -1079,19 +1123,30 @@ void PsxRuntime::check_and_enter_interrupt(CpuContext& ctx) {
             step_interpreter(ctx);
         }
         if (in_interrupt_) {
-            const u64 cur_cycles = ctx.cycles;
-            ctx                  = saved_irq_ctx_;
-            ctx.cycles           = cur_cycles;
-            pending_aot_call_pc_ = saved_aot_pc_;
-            in_interrupt_        = false;
+            restore_interrupted_context(ctx);
         }
         return;
     }
 
     // Otherwise all firing IRQ bits were handled by SysEnqIntRP; restore context immediately
+    restore_interrupted_context(ctx);
+}
+
+void PsxRuntime::restore_interrupted_context(CpuContext& ctx) noexcept {
+    // Return from the HLE exception: the interrupted thread gets its GPRs, HI/LO and PC back, but
+    // COP0 is not part of its register file. Only SR (mode stack, as RFE pops it), Cause and EPC
+    // come from the pre-exception state; everything else written inside the handler stays.
+    // LibCrypt (Vagrant Story PAL) keeps its check state in the debug registers BPC/BDA/BDAM
+    // ($3/$5/$9) and updates them from CD-ROM callbacks running in the interrupt.
     const u64 cur_cycles = ctx.cycles;
+    const auto cop0_now  = ctx.cop0;
     ctx                  = saved_irq_ctx_;
     ctx.cycles           = cur_cycles;
+    const u32 sr = ctx.cop0[12], cause = ctx.cop0[13], epc = ctx.cop0[14];
+    ctx.cop0     = cop0_now;
+    ctx.cop0[12] = sr;
+    ctx.cop0[13] = cause;
+    ctx.cop0[14] = epc;
     pending_aot_call_pc_ = saved_aot_pc_;
     in_interrupt_        = false;
 }
@@ -1453,11 +1508,7 @@ bool PsxRuntime::handle_bios_vector(CpuContext& ctx, u32 masked_pc) {
             }
             case 0x17: { // ReturnFromException()
                 if (in_interrupt_) {
-                    const u64 cur_cycles = ctx.cycles;
-                    ctx                  = saved_irq_ctx_;
-                    ctx.cycles           = cur_cycles;
-                    pending_aot_call_pc_ = saved_aot_pc_;
-                    in_interrupt_        = false;
+                    restore_interrupted_context(ctx);
                     return true;
                 }
                 break;
@@ -1643,7 +1694,8 @@ void PsxRuntime::call_function(CpuContext& ctx, u32 target_pc) {
         ++aot_dispatches_;
         ctx.pc      = target_pc;
         ctx.next_pc = target_pc + 4u;
-        const u32 chk_sp = ctx.get_reg(reg::SP), chk_ra = ctx.get_reg(reg::RA);
+        const u32 chk_ra = ctx.get_reg(reg::RA);
+        const u32 chk_sp = ctx.get_reg(reg::SP);
         const u64 chk_lj = longjmp_token_;
         aot(ctx, *this);
         // A `jr $ra` whose target lies inside this very function (pseudo-call via branch with a
@@ -1658,8 +1710,7 @@ void PsxRuntime::call_function(CpuContext& ctx, u32 target_pc) {
             }
             const u32 cur = to_kseg0(ctx.pc);
             if (span != 0 && cur >= canonical && cur < canonical + span) {
-                u64 guard = 0;
-                while (!ctx.halted && ctx.pc != chk_ra && guard++ < 50'000'000ull) {
+                while (!ctx.halted && !(ctx.pc == chk_ra && ctx.get_reg(reg::SP) >= chk_sp)) {
                     if (should_unwind(ctx, in_interrupt_, chk_lj)) {
                         return;
                     }
@@ -1680,11 +1731,16 @@ void PsxRuntime::call_function(CpuContext& ctx, u32 target_pc) {
     const bool started_in_irq = in_interrupt_;
     const u64 entry_lj        = longjmp_token_;
     const u32 return_ra       = ctx.get_reg(reg::RA);
+    const u32 entry_sp        = ctx.get_reg(reg::SP);
     ctx.pc      = target_pc;
     ctx.next_pc = target_pc + 4u;
 
-    u64 guard = 0;
-    while (!ctx.halted && ctx.pc != return_ra && guard++ < 10'000'000ull) {
+    // The call has returned once execution reaches the return address with the stack popped back
+    // to (or above) the caller's $sp. Checking the PC alone mistakes a nested activation that
+    // returns to the same address (recursion through one call site) for this one. There is no
+    // instruction budget: a long-running callee must not be cut short and handed back to its
+    // AOT caller mid-function; only should_unwind() (cycle limit, longjmp, IRQ exit) leaves early.
+    while (!ctx.halted && !(ctx.pc == return_ra && ctx.get_reg(reg::SP) >= entry_sp)) {
         if (should_unwind(ctx, started_in_irq, entry_lj)) {
             return;
         }
@@ -1871,7 +1927,7 @@ void PsxRuntime::step_interpreter(CpuContext& ctx) {
 
         case MipsOp::MFC0: ctx.set_reg(i.rt, ctx.cop0[i.rd & 31u]); break;
         case MipsOp::MTC0: ctx.cop0[i.rd & 31u] = rt_val; break;
-        case MipsOp::RFE:  ctx.cop0[12] = (ctx.cop0[12] & ~0x0Fu) | ((ctx.cop0[12] >> 2) & 0x0Fu); break;
+        case MipsOp::RFE: ctx.cop0[12] = (ctx.cop0[12] & ~0x0Fu) | ((ctx.cop0[12] >> 2) & 0x0Fu); break;
 
         case MipsOp::MFC2: ctx.set_reg(i.rt, gte_.read_data(i.rd)); break;
         case MipsOp::CFC2: ctx.set_reg(i.rt, gte_.read_ctrl(i.rd)); break;
