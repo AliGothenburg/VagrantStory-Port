@@ -18,6 +18,76 @@ Sıfırdan C++20 ile geliştirilen modüler **Vagrant Story (PS1 -> Windows x64)
 | **PS1 SPU ADPCM & WinMM Ses** | `include/vsport/psx_spu.hpp`, `src/psx_spu.cpp`, `src/win32_audio.cpp` | 512 KB SPU Ses RAM'i, `DMA4` dalga bankası aktarımı, 24 donanım sesi, Sony 4-bit ADPCM IIR + ADSR zarf sentezleyici ve 44.1 kHz Stereo `waveOut` / `.wav` çıkışı |
 | **Hibrit AOT Host Runtime** | `include/vsport/runtime.hpp`, `src/runtime.cpp` | 2 MB / 8 MB RAM, 1 KB Scratchpad, BIOS `A0`/`B0`/`C0` + Root Counter HLE, tam-çift yönlü `SIO0` kontrolcü ve sayfa-epoch önbellekli **Overlay-Duyarlı Native x64 AOT + Yorumlayıcı hibrit dağıtıcı** |
 
+## Oynamak
+
+`./build.ps1` derlemenin sonunda oyunu `dist/VagrantStory.exe` olarak kopyalar. Bu dosyaya çift
+tıklamak yeterlidir (konsol penceresi açılmaz):
+
+- Açılışta **ayarlar penceresi** gelir:
+  - **Oyun:** oyun klasörünü seçin (içindeki `.cue`/`.bin`/`.iso` ve `.sbi` otomatik bulunur) ya da
+    dosyaları tek tek seçin. Pencere diski doğrular (sürüm, Avrupa sürümünde `.sbi` durumu).
+  - **Görüntü:** iç çözünürlük (1× orijinal 320×240, 2×–6×; 1080p ekranlar için 5×),
+    3D doku yumuşatma, pencere / tam ekran, **görüntü oranı** (4:3, 10:7, 3:2, 16:10, 16:9 ya da
+    pencereyi doldur), pencere boyutu (480p, 720p, 960p, 1080p, 1200p, 1440p, 4K; genişlik orana
+    göre ayarlanır), filtre (keskin piksel, yumuşak, CRT tarama çizgileri), tam sayı ölçekleme.
+  - **Çizim:** yüksek çözünürlüklü görüntüyü kimin çizeceği. **Ekran kartı** (varsayılan,
+    Direct3D 11) çok daha hızlıdır; **İşlemci** eski yazılım çizicisidir. İkisinin çıktısı
+    neredeyse piksel piksel aynıdır. Ekran kartı başlatılamazsa oyun kendiliğinden işlemciye geçer.
+  - **Karakter kenar ışığı:** oyun ara sahnelerde ve menüde karakterleri önce parlak beyaz,
+    ışığa doğru ~1 piksel kaydırılmış olarak, sonra normal çizer (orijinal kenar ışığı efekti).
+    Yüksek iç çözünürlükte bu kayma sert, kalın bir bant olur. **Yumuşak** (varsayılan) ışığı
+    yarı saydam çizip dışa doğru söndürür; **Keskin** ince, parlak bir çizgiye indirir;
+    **Kapalı** çizmez.
+  - **Köşe hassasiyeti:** PS1'in geometri birimi (GTE) her noktayı tam piksele yuvarlar; bu
+    yüzden modeller ve kenarlar hareket ederken titrer. **Titreme düzeltmesi** (iç çözünürlük
+    2× ve üstü) GTE'nin hesapladığı tam konumu saklar ve yüksek çözünürlüklü çizimde kullanır.
+    **Titreme + perspektifli doku** (varsayılan) ayrıca köşelerin derinliğini kullanarak dokuları
+    perspektife uygun çizer: zemin ve duvarlardaki dokular artık köşegenler boyunca bükülüp
+    kaymaz (PS1 dokuyu ekranda doğrusal yayar). Derinliği bilinmeyen poligonlar PS1'deki gibi
+    çizilir. Oyun bu noktaları kendi koduyla kopyaladığı için eşleştirme piksel
+    değeriyle yapılır (köşelerin ~%90'ı); aynı piksele düşen birden fazla nokta varsa o köşe
+    orijinal konumunda kalır. Oyunun kendisi ve orijinal (1×) görüntü değişmez.
+  - **3D sahneyi orana göre genişlet:** açıksa geniş oranlarda 3D sahne esnetilmez, yanlara
+    doğru daha fazlası görünür (oyunun ekran dışı kabul edip çizmediği kenarlarda boşluk
+    olabilir; 10:7 ya da 3:2 gibi ara oranlarda bu boşluklar çok daha azdır). Kapalıysa görüntü
+    seçilen orana esnetilir, hiç boşluk kalmaz.
+  - Pencere kipinde pencere seçilen oranı korur (kenarından sürükleyince ve F3 ile oran
+    değiştirince), bu yüzden etrafta siyah bant kalmaz. Tam ekranda ekranınızın oranını seçin
+    (ör. 16:9 monitörde 16:9) ya da "doldur"u kullanın. Tam sayı ölçekleme yalnızca 1× iç
+    çözünürlükte uygulanır.
+  - **Ses:** sesi kapatma ve ses seviyesi.
+  - **Kontrolcü tuşları…:** her PS1 tuşunun (×, ○, □, △, L1/R1, L2/R2, START, SELECT, L3/R3)
+    kontrolcüde hangi tuşa basılınca çalışacağını seçin; "Varsayılana döndür" konuma göre
+    eşlemeye geri döner. Yön tuşları ve sol çubuk sabittir; klavye tuşları değişmez.
+- Ayarlar exe'nin yanındaki `VagrantStory.ini` dosyasına kaydedilir. "Bu pencereyi her açılışta
+  göster" kapatılırsa oyun doğrudan açılır; ayarlara dönmek için oyunu **Shift** tuşuna basılı
+  tutarak başlatın.
+- Oyun içinde **F11** / **Alt+Enter** tam ekran, **F4** filtre, **F3** görüntü oranı (sırayla),
+  **Shift+F3** 3D genişletme, **M** ses; bu değişiklikler de kaydedilir. **Esc** çıkış (onay sorulur).
+- **İç çözünürlük** 3D sahneyi 2×–4× çözünürlükte çizer: polygon kenarları ve doku eşlemesi
+  keskinleşir. Oyunun kendi VRAM'i orijinal çözünürlükte kalır (emülasyon doğruluğu korunur),
+  yüksek çözünürlüklü kopya yalnızca ekranda gösterilir. Bu kopya 24 bit renkle (true color)
+  çizilir: karanlık sahnelerde PS1'in 15 bit renklerinin oluşturduğu sert renk bantları
+  görünmez. **3D doku yumuşatma** düşük
+  çözünürlüklü dokulardaki blokları giderir (2D yazıları da biraz yumuşatır).
+- **Hız:** Yüksek çözünürlüklü görüntüyü varsayılan olarak ekran kartı çizer (Direct3D 11;
+  PS1 dokuları, yarı saydamlık, maske biti ve perspektif shader'da PS1 ile aynı tam sayı
+  hesabıyla yapılır). Bu bilgisayarda açılış sinematiğinin en ağır yerlerinde bile 5× ve 6×
+  gerçek zamanın üstünde kalır (en ağır iz efektinde 5× ≈ 1,4 katı). **İşlemci** seçilirse çizim
+  işlemcinin tüm çekirdeklerine şeritler halinde dağıtılır; o zaman ağır sahnelerde 4× ≈ 1,06
+  katı, 5× ≈ 0,8 katı (yavaşlama) olur. `vs_host --perf` her 250 karede hızı yazar
+  (`--gpu-hr` / `--cpu-hr` çiziciyi seçer; başsız çalıştırmada varsayılan işlemcidir).
+- En net görüntü için iç çözünürlükle birlikte **Keskin piksel** filtresini kullanın; Yumuşak ve
+  CRT filtreleri görüntüyü bilerek bulanıklaştırır.
+- **Hafıza kartı:** Oyunda kayıt yapılabilir. Kart 1, exe'nin yanındaki
+  `saves\VagrantStory_kart1.mcr` dosyasıdır (ayarlar penceresinden değiştirilebilir). Bu, diğer
+  emülatörlerin (DuckStation, ePSXe, Mednafen…) okuduğu standart 128 KB `.mcr` biçimidir; dosya
+  yoksa boş, formatlanmış bir kart oluşturulur. Değişiklikler oyun yazmayı bitirdikten yaklaşık
+  yarım saniye sonra ve çıkışta diske kaydedilir.
+
+Terminalden başlatılırsa `VagrantStory.exe` günlüğü o terminale yazar. Geliştirme ve hata ayıklama
+seçenekleri için konsol sürümü `build/vs_host.exe` kullanılır.
+
 ## Derleme
 
 ```powershell
@@ -82,8 +152,18 @@ ABD sürümünde (SLUS-01040) bu koruma yoktur.
    # Headless modda belirli VBlank karelerinde tuş basma (BUTON@VBLANK[:KARE], virgülle ayrılır):
    ./build/vs_host.exe --disc $Disc --headless --cycles 470000000 --press START@370,START@430,DOWN@650:4 --dump-display menu.ppm
 
+   # Her N karede bir ekran görüntüsü kaydetme (ör. 1x ile 4x'i kare kare karşılaştırmak için);
+   # --rim 0/1/2 karakter kenar ışığını seçer:
+   ./build/vs_host.exe --disc $Disc --sbi $Sbi --headless --cycles 20000000000 --scale 4 --dump-series kareler 50
+
    # Headless performans, 24-bit aktif ekran / VRAM ve 44.1 kHz WAV ses çıktısı testi:
    ./build/vs_host.exe --disc $Disc --headless --cycles 1150000000 --dump-display fmv.ppm --dump-wav spu.wav
+
+   # Birim testleri; ikincisi ekran kartı çizicisini işlemciyle karşılaştırır (her tür primitif,
+   # yarı saydamlık, maske, doku penceresi, perspektif, kendi alanından dokulanan sprite).
+   # Microsoft'un WARP yazılım cihazında çalışır, ekran kartı gerekmez:
+   ./build/vsport_tests.exe
+   ./build/vsport_gpu_tests.exe
    ```
    Oyun, seçtiği video kipine göre gerçek zamanlı hızda (PAL 50 Hz / NTSC 60 Hz) çalışır.
 
@@ -103,4 +183,7 @@ ABD sürümünde (SLUS-01040) bu koruma yoktur.
    | START | `Enter` | Menu (Start) | Options |
    | SELECT | `Backspace` | View (Back) | Share / Create |
 
-   *Pencere Kısayolları:* `Tab` (basılı tut) Hızlı ileri | `F2` Tam 1024×512 VRAM | `F3` 16:9 Geniş Ekran GTE | `F4` HLSL Shader Kipi (Keskin / Bilinear / Trinitron CRT) | `M` Ses Aç/Kapat | `F12` PPM Kaydet | `ESC` Çıkış
+   Kontrolcü tuşları ayar penceresindeki **Kontrolcü tuşları…** düğmesiyle değiştirilebilir
+   (`VagrantStory.ini` içinde `pad_cross=circle` gibi satırlar olarak saklanır).
+
+   *Pencere Kısayolları:* `F11` / `Alt+Enter` Tam ekran | `Tab` (basılı tut) Hızlı ileri | `F2` Tam 1024×512 VRAM | `F3` Görüntü oranı (4:3 → 10:7 → 3:2 → 16:10 → 16:9 → doldur) | `Shift+F3` 3D genişletme (GTE) | `F4` HLSL Shader Kipi (Keskin / Bilinear / Trinitron CRT) | `M` Ses Aç/Kapat | `F12` PPM Kaydet | `ESC` Çıkış

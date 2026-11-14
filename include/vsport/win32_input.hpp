@@ -1,5 +1,6 @@
 #pragma once
 
+#include "vsport/pad_mapping.hpp"
 #include "vsport/types.hpp"
 
 #include <memory>
@@ -24,9 +25,12 @@ public:
 
     // Polls every connected controller and returns the merged state as ACTIVE-HIGH PS1 bits
     // (see vsport/pad_mapping.hpp). Prints a line when a controller connects or disconnects.
+    // Buttons are returned after this remap (default: Xbox/PlayStation layout by position)
     [[nodiscard]] u16 poll();
+    void set_button_map(const pad::ButtonMap& map) noexcept { map_ = map; }
 
 private:
+    pad::ButtonMap map_ = pad::default_button_map();
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

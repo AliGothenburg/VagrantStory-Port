@@ -295,6 +295,11 @@ void GteEngine::cmd_rtps(int v_idx, bool sf, bool lm, bool last_vertex) noexcept
     data_[13] = data_[14];
     data_[14] = pack16(sx2, sy2);
     data_[15] = data_[14];
+    // Exact position for the upscaled picture (only when the point was not clamped)
+    if (pgxp_ && sx2 == sx_raw && sy2 == sy_raw) {
+        pgxp_->store(data_[14], static_cast<float>(static_cast<double>(ofx + proj_x) / 65536.0),
+                     static_cast<float>(static_cast<double>(ofy + proj_y) / 65536.0), static_cast<float>(sz3));
+    }
 
     if (last_vertex) {
         const s64 dqa = lo16s(ctrl_[27]);

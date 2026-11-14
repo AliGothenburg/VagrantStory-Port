@@ -214,7 +214,7 @@ void Win32GamepadInput::shutdown() {
 
 u16 Win32GamepadInput::poll() {
     const ULONGLONG now = GetTickCount64();
-    return static_cast<u16>(impl_->poll_xinput(now) | impl_->poll_dinput(now));
+    return pad::apply_button_map(static_cast<u16>(impl_->poll_xinput(now) | impl_->poll_dinput(now)), map_);
 }
 
 } // namespace vsport

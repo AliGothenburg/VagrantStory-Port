@@ -111,6 +111,12 @@ void Win32AudioOut::pump_from_spu(PsxSpu& spu) {
             std::fill(impl_->pcm_storage[i].begin(), impl_->pcm_storage[i].end(), static_cast<s16>(0));
         } else {
             std::memcpy(impl_->pcm_storage[i].data(), impl_->staging.data(), got * 2u * sizeof(s16));
+            if (volume_percent_ < 100u) {
+                for (std::size_t s = 0; s < got * 2u; ++s) {
+                    impl_->pcm_storage[i][s] = static_cast<s16>(
+                        (static_cast<s32>(impl_->pcm_storage[i][s]) * static_cast<s32>(volume_percent_)) / 100);
+                }
+            }
             if (got < Impl::FRAMES_PER_BUFFER) {
                 std::fill(impl_->pcm_storage[i].begin() + static_cast<std::ptrdiff_t>(got * 2u),
                           impl_->pcm_storage[i].end(), static_cast<s16>(0));

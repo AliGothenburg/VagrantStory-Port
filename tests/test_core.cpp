@@ -1,6 +1,7 @@
 #include "vsport/cdrom_iso.hpp"
 #include "vsport/cfg_lifter.hpp"
 #include "vsport/gte.hpp"
+#include "vsport/memcard.hpp"
 #include "vsport/mips_decoder.hpp"
 #include "vsport/pad_mapping.hpp"
 #include "vsport/psx_exe.hpp"
@@ -13,6 +14,8 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
+#include <string>
 #include <vector>
 
 using namespace vsport;
@@ -485,6 +488,291 @@ void test_dicr_byte_mmio_masking_and_ack() {
     CHECK((rt.read32(0x1F8010F4u) & 0x88000000u) == 0u, "8-bit write to DICR+3 clears DMA3 flag and master bit 31");
 }
 
+// The upscaled picture is drawn from a queue later than the native one. A texture that the game
+// replaces before the queue is drawn (memory card screen icons, animated textures) must still be
+// sampled as it was when the primitive was sent.
+void test_gpu_upscaled_queue_sees_old_textures() {
+    PsxGpu gpu;
+    gpu.set_internal_scale(2);
+    const auto upload_pixel = [&](u32 x, u32 y, u16 color) {
+        gpu.write_gp0(0xA0000000u);
+        gpu.write_gp0((y << 16) | x);
+        gpu.write_gp0((1u << 16) | 1u);
+        gpu.write_gp0(color);
+    };
+    gpu.write_gp0(0xE100010Au);       // Texpage x=640, 15bpp direct
+    upload_pixel(640, 0, 0x001Fu);    // Red texel
+    gpu.write_gp0(0x6D000000u);       // 1x1 raw textured sprite at (20,20) sampling (0,0)
+    gpu.write_gp0((20u << 16) | 20u);
+    gpu.write_gp0(0u);
+    upload_pixel(640, 0, 0x7C00u);    // Texture replaced by blue before the queue is drawn
+    gpu.write_gp0(0x6D000000u);       // Second sprite at (21,20) uses the new texel
+    gpu.write_gp0((20u << 16) | 21u);
+    gpu.write_gp0(0u);
+    gpu.flush_hr();
+
+    const auto& hr = gpu.hr_vram();
+    const auto hr_px = [&](u32 x, u32 y) { return hr[static_cast<std::size_t>(y * 2) * (PsxGpu::VRAM_WIDTH * 2) + x * 2]; };
+    CHECK(gpu.read_vram_pixel(20, 20) == 0x001Fu && gpu.read_vram_pixel(21, 20) == 0x7C00u, "Native sprites use old/new texel");
+    // The upscaled picture is 24-bit (0x00BBGGRR)
+    CHECK(hr_px(20, 20) == 0x0000FFu, "Upscaled sprite samples the texture as it was when sent");
+    CHECK(hr_px(21, 20) == 0xFF0000u, "Upscaled sprite after the upload samples the new texture");
+
+    // Dark modulation (light value 16/128) keeps 8-bit precision in the upscaled picture: the
+    // native 15-bit result collapses to 3/31, the upscaled one stays at 31/255
+    upload_pixel(640, 0, 0x001Fu);    // Red texel again
+    gpu.write_gp0(0x6C101010u);       // 1x1 modulated textured sprite, colour 16
+    gpu.write_gp0((22u << 16) | 22u);
+    gpu.write_gp0(0u);
+    gpu.flush_hr();
+    CHECK((gpu.read_vram_pixel(22, 22) & 0x1Fu) == 3u, "Native dark texel is quantized to 15-bit");
+    CHECK(gpu.hr_vram()[static_cast<std::size_t>(22 * 2) * (PsxGpu::VRAM_WIDTH * 2) + 22 * 2] == 0x00001Fu,
+          "Upscaled dark texel keeps full 8-bit precision (true colour)");
+
+    // ...but where the PS1 result is black (light value 4/128 -> 15-bit 0), it stays black
+    gpu.write_gp0(0x6C040404u);
+    gpu.write_gp0((23u << 16) | 23u);
+    gpu.write_gp0(0u);
+    gpu.flush_hr();
+    CHECK(gpu.read_vram_pixel(23, 23) == 0u, "Native very dark texel is black");
+    CHECK(gpu.hr_vram()[static_cast<std::size_t>(23 * 2) * (PsxGpu::VRAM_WIDTH * 2) + 23 * 2] == 0u,
+          "Upscaled very dark texel stays black like hardware (no faint texture in black areas)");
+}
+
+// A polygon whose vertices all use the same texture coordinate must sample exactly that texel in
+// the upscaled picture too. Vagrant Story covers the void around rooms with such polygons; with
+// float rounding (5 -> 4.9999) the neighbouring transparent texel left holes that showed as streaks.
+void test_gpu_upscaled_constant_uv_has_no_holes() {
+    PsxGpu gpu;
+    constexpr u32 S = 5;
+    gpu.set_internal_scale(S);
+    gpu.write_gp0(0xA0000000u);              // Texel (5,0) of the 15bpp page at x=640: grey
+    gpu.write_gp0((0u << 16) | 645u);
+    gpu.write_gp0((1u << 16) | 1u);
+    gpu.write_gp0(0x4210u);                  // (texel 4 stays 0 = transparent)
+    gpu.write_gp0(0x24808080u);              // Flat textured triangle, all uv = (5,0)
+    gpu.write_gp0((100u << 16) | 100u);
+    gpu.write_gp0(5u);
+    gpu.write_gp0((130u << 16) | 300u);
+    gpu.write_gp0((0x010Au << 16) | 5u);     // Texpage x=640, 15bpp
+    gpu.write_gp0((300u << 16) | 120u);
+    gpu.write_gp0(5u);
+    gpu.flush_hr();
+
+    // The upscaled pixel at (x*S, y*S) samples the same point as native pixel (x, y)
+    u32 covered = 0, holes = 0;
+    for (u32 y = 95; y < 305; ++y) {
+        for (u32 x = 95; x < 305; ++x) {
+            if (gpu.read_vram_pixel(x, y) == 0) continue;
+            ++covered;
+            if (gpu.hr_vram()[static_cast<std::size_t>(y * S) * (PsxGpu::VRAM_WIDTH * S) + x * S] == 0) ++holes;
+        }
+    }
+    CHECK(covered > 10000u, "Native constant-uv triangle is drawn");
+    CHECK(holes == 0u, "Upscaled constant-uv triangle has no holes (no streaks)");
+}
+
+// Vagrant Story's rim light: a white (FFFFFF) copy of the model shifted ~1 pixel toward the light,
+// then the normal model on top. Thin mode shifts the copy by 1 upscaled pixel instead of 1 native
+// pixel (N upscaled pixels); Soft fades it out semi-transparently; Off skips it.
+void test_gpu_rim_light_modes() {
+    const auto draw = [](PsxGpu& gpu) {
+        gpu.write_gp0(0xA0000000u);          // Opaque grey texel (0,0) on the 15bpp page at x=640
+        gpu.write_gp0((0u << 16) | 640u);
+        gpu.write_gp0((1u << 16) | 1u);
+        gpu.write_gp0(0x4210u);
+        const auto tri = [&](u32 color, s32 dx, s32 dy) {
+            gpu.write_gp0(0x24000000u | color);
+            gpu.write_gp0((static_cast<u32>(20 + dy) << 16) | static_cast<u32>(20 + dx));
+            gpu.write_gp0(0u);
+            gpu.write_gp0((static_cast<u32>(20 + dy) << 16) | static_cast<u32>(60 + dx));
+            gpu.write_gp0(0x010A0000u);      // Texpage x=640, 15bpp
+            gpu.write_gp0((static_cast<u32>(60 + dy) << 16) | static_cast<u32>(20 + dx));
+            gpu.write_gp0(0u);
+        };
+        tri(0xFFFFFFu, 1, -1);               // Rim copy: up-right by (1,-1)
+        tri(0x808080u, 0, 0);                // Normal model
+        gpu.flush_hr();
+    };
+    constexpr u32 S = 4;
+    const auto hr_at = [&](const PsxGpu& gpu, u32 x, u32 y) {
+        return gpu.hr_vram()[static_cast<std::size_t>(y) * (PsxGpu::VRAM_WIDTH * S) + x];
+    };
+
+    // Native row 19 (just above the normal triangle) is where the game's rim shows; upscaled rows 76..79
+    PsxGpu soft;
+    soft.set_internal_scale(S);
+    draw(soft);                              // Soft is the default
+    const u32 outer = hr_at(soft, 30 * S, 19 * S) & 0xFFu, inner = hr_at(soft, 30 * S, 20 * S - 1) & 0xFFu;
+    CHECK(soft.read_vram_pixel(30, 19) != 0u, "Soft: native picture is unchanged");
+    CHECK(outer > 0u && inner > outer, "Soft: rim light fades outward");
+    const u32 rim_full = (static_cast<u32>(((0x10u * 527u + 23u) >> 6)) * 0xFFu) >> 7; // Opaque rim brightness
+    CHECK(inner < std::min(255u, rim_full), "Soft: rim light is partly transparent");
+
+    PsxGpu sharp;
+    sharp.set_internal_scale(S);
+    sharp.set_rim_light(PsxGpu::RimLight::Sharp);
+    draw(sharp);
+    CHECK(hr_at(sharp, 30 * S, 19 * S) == 0u, "Sharp: upscaled rim no longer reaches a whole native pixel up");
+    CHECK(hr_at(sharp, 30 * S, 20 * S - 1) != 0u, "Sharp: upscaled rim is one upscaled pixel tall");
+
+    PsxGpu off;
+    off.set_internal_scale(S);
+    off.set_rim_light(PsxGpu::RimLight::Off);
+    draw(off);
+    CHECK(off.read_vram_pixel(30, 19) == 0u && hr_at(off, 30 * S, 20 * S - 1) == 0u, "Off: rim copy is not drawn");
+}
+
+// Exact GTE positions (PGXP-style) move upscaled polygon edges inside the native pixel; the
+// native picture is unchanged, and entries that do not round to the vertex or are stale are ignored.
+void test_gpu_exact_vertex_positions() {
+    constexpr u32 S = 4;
+    const auto xy = [](s32 x, s32 y) { return (static_cast<u32>(static_cast<u16>(y)) << 16) | static_cast<u16>(x); };
+    PgxpCache cache;
+    cache.set_enabled(true);
+    cache.store(xy(10, 10), 10.75f, 10.0f, 100.0f);
+    cache.store(xy(10, 40), 10.75f, 40.0f, 100.0f);
+    cache.store(xy(30, 10), 29.40f, 10.0f, 100.0f);   // Does not round down to 30: must be ignored
+    PgxpCache::Point pt;
+    CHECK(cache.lookup(xy(10, 10), pt) && pt.x == 10.75f, "Exact point is found by its pixel value");
+    CHECK(!cache.lookup(xy(30, 10), pt), "Exact point that rounds to another pixel is rejected");
+
+    PsxGpu gpu;
+    gpu.set_internal_scale(S);
+    gpu.set_pgxp(&cache);
+    gpu.write_gp0(0x20FFFFFFu);                         // Flat white triangle
+    gpu.write_gp0(xy(10, 10));
+    gpu.write_gp0(xy(10, 40));
+    gpu.write_gp0(xy(30, 10));
+    gpu.flush_hr();
+    const auto hr_at = [&](u32 x, u32 y) { return gpu.hr_vram()[static_cast<std::size_t>(y) * (PsxGpu::VRAM_WIDTH * S) + x]; };
+    CHECK(gpu.read_vram_pixel(10, 15) != 0u, "Native picture keeps the whole-pixel vertex");
+    CHECK(hr_at(10 * S, 15 * S) == 0u && hr_at(10 * S + 2, 15 * S) == 0u, "Upscaled edge starts at the exact position");
+    CHECK(hr_at(10 * S + 3, 15 * S) != 0u, "Upscaled edge is drawn from floor(10.75 * 4) = 43");
+
+    for (u32 f = 0; f <= PgxpCache::MAX_AGE_FRAMES; ++f) cache.begin_frame();
+    CHECK(!cache.lookup(xy(10, 10), pt), "Stale exact points are not used");
+}
+
+// Perspective-correct texturing: vertex A (u=0, depth 100) to B (u=200, depth 400). Halfway across
+// the screen the affine PS1 mapping samples u=100; the correct perspective position is u=40.
+void test_gpu_perspective_textures() {
+    constexpr u32 S = 2;
+    const auto xy = [](s32 x, s32 y) { return (static_cast<u32>(static_cast<u16>(y)) << 16) | static_cast<u16>(x); };
+    PgxpCache cache;
+    cache.set_enabled(true);
+    cache.store(xy(10, 10), 10.0f, 10.0f, 100.0f);
+    cache.store(xy(110, 10), 110.0f, 10.0f, 400.0f);
+    cache.store(xy(10, 60), 10.0f, 60.0f, 100.0f);
+    const auto draw = [&](PsxGpu& gpu) {
+        gpu.write_gp0(0xA0000000u);                    // 256x1 texture row at (640,0): red = u / 8
+        gpu.write_gp0((0u << 16) | 640u);
+        gpu.write_gp0((1u << 16) | 256u);
+        for (u32 u = 0; u < 256; u += 2) gpu.write_gp0((u >> 3) | 0x0400u | ((((u + 1) >> 3) | 0x0400u) << 16));
+        gpu.write_gp0(0x25000000u);                    // Raw textured triangle
+        gpu.write_gp0(xy(10, 10));
+        gpu.write_gp0(0u);                             // u=0
+        gpu.write_gp0(xy(110, 10));
+        gpu.write_gp0(0x010A0000u | 200u);             // u=200, texpage x=640 15bpp
+        gpu.write_gp0(xy(10, 60));
+        gpu.write_gp0(0u);
+        gpu.flush_hr();
+    };
+    const auto red_at = [](const PsxGpu& gpu, u32 x, u32 y) {
+        const u32 c = gpu.hr_vram()[static_cast<std::size_t>(y * S) * (PsxGpu::VRAM_WIDTH * S) + x * S] & 0xFFu;
+        return (c * 31u + 127u) / 255u; // Back to 5 bits
+    };
+    PsxGpu affine;
+    affine.set_internal_scale(S);
+    affine.set_pgxp(&cache);
+    draw(affine);
+    PsxGpu persp;
+    persp.set_internal_scale(S);
+    persp.set_pgxp(&cache);
+    persp.set_perspective_textures(true);
+    draw(persp);
+    const u32 ra = red_at(affine, 60, 10), rp = red_at(persp, 60, 10);
+    CHECK(ra >= 11u && ra <= 13u, "Affine mapping samples u~100 halfway");
+    CHECK(rp >= 4u && rp <= 6u, "Perspective mapping samples u~40 halfway");
+    CHECK(persp.read_vram_pixel(60, 10) == affine.read_vram_pixel(60, 10), "Native picture is unchanged");
+}
+
+// GP1(03h) display off: the picture must be black (the game hides VRAM set-up before movies)
+void test_gpu_display_off_is_black() {
+    PsxGpu gpu;
+    gpu.write_gp0(0x02FFFFFFu);              // Fill the display area white
+    gpu.write_gp0(0u);
+    gpu.write_gp0((240u << 16) | 320u);
+    CHECK(!gpu.display_enabled(), "Display is off after reset (as on hardware) until the game enables it");
+    gpu.write_gp1(0x03000000u);
+    CHECK(gpu.display_enabled(), "GP1(03h) switches the display on");
+    gpu.write_gp1(0x03000001u);
+    CHECK(!gpu.display_enabled(), "GP1(03h) switches the display off");
+    const auto path = std::filesystem::temp_directory_path() / "vsport_display_off.ppm";
+    CHECK(gpu.dump_ppm(path, false), "Display dump written");
+    std::ifstream in(path, std::ios::binary);
+    std::string data((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    in.close();
+    std::filesystem::remove(path);
+    CHECK(data.size() > 100 && static_cast<unsigned char>(data.back()) == 0u && static_cast<unsigned char>(data[data.size() / 2]) == 0u,
+          "Display dump is black while the display is off");
+    gpu.write_gp1(0x03000000u);
+    CHECK(gpu.display_enabled(), "GP1(03h) switches the display back on");
+}
+
+// GP0(E6h) mask bit, and a sprite whose texture is its own draw area shifted 2 rows (Vagrant
+// Story's cutscene trail effect): the upscaled picture must follow the same rules as native VRAM.
+void test_gpu_mask_bit_and_self_texturing_sprite() {
+    constexpr u32 S = 3;
+    PsxGpu gpu;
+    gpu.set_internal_scale(S);
+    const auto hr_at = [&](u32 x, u32 y) { return gpu.hr_vram()[static_cast<std::size_t>(y * S) * (PsxGpu::VRAM_WIDTH * S) + x * S]; };
+    const auto flat_tri = [&](u32 color) {
+        gpu.write_gp0(0x20000000u | color);
+        gpu.write_gp0((10u << 16) | 10u);
+        gpu.write_gp0((10u << 16) | 30u);
+        gpu.write_gp0((30u << 16) | 10u);
+    };
+    gpu.write_gp0(0xE6000001u);              // Set mask while drawing
+    flat_tri(0x0000FFu);
+    gpu.flush_hr();
+    CHECK(gpu.read_vram_pixel(12, 12) == 0x801Fu, "E6 set-mask: native pixel gets bit 15");
+    CHECK((hr_at(12, 12) & 0x01000000u) != 0, "E6 set-mask: upscaled pixel gets the mask bit");
+    gpu.write_gp0(0xE6000002u);              // Check mask: masked pixels are protected
+    flat_tri(0xFF0000u);
+    gpu.flush_hr();
+    CHECK(gpu.read_vram_pixel(12, 12) == 0x801Fu, "E6 check-mask: native masked pixel not overwritten");
+    CHECK((hr_at(12, 12) & 0xFFFFFFu) == 0x0000FFu, "E6 check-mask: upscaled masked pixel not overwritten");
+    gpu.write_gp0(0xE6000000u);
+
+    // 16x16 pattern at (640,0), then a raw 15bpp sprite at (640,2) reading (0,0) of that page
+    gpu.write_gp0(0xA0000000u);
+    gpu.write_gp0((0u << 16) | 640u);
+    gpu.write_gp0((16u << 16) | 16u);
+    for (u32 i = 0; i < 16 * 16 / 2; ++i) {
+        const u32 a = (i * 2) % 16, b = (i * 2 + 1) % 16, y = (i * 2) / 16;
+        const u32 ca = ((a * 2) & 31u) | (((y * 2) & 31u) << 5) | 0x4000u, cb = ((b * 2) & 31u) | (((y * 2) & 31u) << 5) | 0x4000u;
+        gpu.write_gp0(ca | (cb << 16));
+    }
+    gpu.write_gp0(0xE100010Au);              // Texpage x=640, 15bpp
+    gpu.write_gp0(0x65000000u);              // Raw textured sprite, variable size
+    gpu.write_gp0((2u << 16) | 640u);
+    gpu.write_gp0(0u);
+    gpu.write_gp0((14u << 16) | 16u);
+    gpu.flush_hr();
+    u32 mismatch = 0;
+    for (u32 y = 0; y < 16; ++y) {
+        for (u32 x = 640; x < 656; ++x) {
+            const u16 n = gpu.read_vram_pixel(x, y);
+            const u32 expect = ((((n & 31u) * 527u + 23u) >> 6)) | (((((n >> 5) & 31u) * 527u + 23u) >> 6) << 8) |
+                               (((((n >> 10) & 31u) * 527u + 23u) >> 6) << 16);
+            if ((hr_at(x, y) & 0xFFFFFFu) != expect) ++mismatch;
+        }
+    }
+    CHECK(gpu.read_vram_pixel(640, 4) == gpu.read_vram_pixel(640, 0), "Self-texturing sprite repeats rows natively (reads its own output)");
+    CHECK(mismatch == 0u, "Upscaled self-texturing sprite matches the native result");
+}
+
 // GP0(E2h) texture window must wrap texture coordinates (Vagrant Story dialog balloons use
 // E2000318: a 64x64 window), and polygons must not draw their right/bottom edges.
 void test_gpu_texture_window_and_fill_rule() {
@@ -618,6 +906,111 @@ void test_sbi_subchannel_overrides() {
     std::filesystem::remove(path);
 }
 
+// Memory card image: format, files across blocks, erase/rename, and persistence on disk
+void test_memcard_filesystem() {
+    const auto path = std::filesystem::temp_directory_path() / "vsport_test_card.mcr";
+    std::filesystem::remove(path);
+    {
+        MemoryCard card;
+        std::string err;
+        CHECK(card.open(path, &err), "New card image is created");
+        CHECK(std::filesystem::file_size(path) == MemoryCard::CARD_SIZE, "Card image is 128 KB");
+        CHECK(card.data()[0] == 'M' && card.data()[1] == 'C', "Fresh card is formatted (MC header)");
+        CHECK(card.used_blocks() == 0u, "Fresh card has no saves");
+
+        MemoryCard::FileInfo a, b, again;
+        CHECK(card.create_file("BESLES-02754VAG00", 1, a) && a.first_block == 1u && a.size == 8192u, "Create 1-block file");
+        CHECK(!card.create_file("BESLES-02754VAG00", 1, again), "Creating an existing name fails");
+        CHECK(card.create_file("BESLES-02754VAG01", 2, b) && b.size == 16384u, "Create 2-block file");
+        CHECK(card.used_blocks() == 3u, "Three blocks in use");
+
+        // Data crossing the block boundary of the 2-block file
+        u8 out[16]{}, in[16];
+        for (u8 i = 0; i < 16; ++i) out[i] = static_cast<u8>(0xA0 + i);
+        CHECK(card.write_file(b, 8184, out, 16) == 16u, "Write across a block boundary");
+        CHECK(card.read_file(b, 8184, in, 16) == 16u && std::memcmp(in, out, 16) == 0, "Read back across the boundary");
+        CHECK(card.read_file(b, 16380, in, 16) == 4u, "Reads stop at the end of the file");
+
+        MemoryCard::FileInfo f;
+        CHECK(card.find_file("BESLES-02754VAG*", 1, f) && f.name == "BESLES-02754VAG00", "Wildcard finds the first save");
+        CHECK(card.find_file("BESLES-02754VAG*", f.first_block + 1, f) && f.name == "BESLES-02754VAG01", "...and the next one");
+        CHECK(card.erase_file("BESLES-02754VAG00") && !card.find_file("BESLES-02754VAG00", 1, f), "Erase removes the file");
+        CHECK(card.rename_file("BESLES-02754VAG01", "BESLES-02754VAG09"), "Rename");
+        CHECK(card.flush(&err), "Flush to disk");
+    }
+    {
+        MemoryCard card;
+        CHECK(card.open(path), "Reopen the card image");
+        MemoryCard::FileInfo f;
+        u8 in[16];
+        CHECK(card.find_file("BESLES-02754VAG09", 1, f) && card.read_file(f, 8184, in, 16) == 16u && in[0] == 0xA0 && in[15] == 0xAF,
+              "Saved data survives on disk");
+        CHECK(card.used_blocks() == 2u, "Erased blocks are free again");
+    }
+    std::filesystem::remove(path);
+}
+
+// The game's save code through the BIOS: libapi's device table check, then open/write/read/
+// close, firstfile and erase on "bu00:"
+void test_bios_memcard_file_calls() {
+    const auto path = std::filesystem::temp_directory_path() / "vsport_test_card_bios.mcr";
+    std::filesystem::remove(path);
+    PsxRuntime rt;
+    CHECK(rt.attach_memory_card(0, path), "Attach card 1");
+
+    // libapi looks for the "bu" device in the kernel DCB table (pointer at 0x150, size at 0x154)
+    const u32 dcb = rt.read32(0x80000150u), dcb_size = rt.read32(0x80000154u);
+    bool has_bu = false;
+    for (u32 off = 0; off < dcb_size; off += 0x50u) {
+        const u32 name = rt.read32(dcb + off);
+        has_bu = has_bu || (rt.read8(name) == 'b' && rt.read8(name + 1) == 'u' && rt.read8(name + 2) == 0);
+    }
+    CHECK(dcb != 0 && has_bu, "Kernel DCB table lists the memory card device");
+
+    CpuContext ctx{};
+    const auto bios = [&](u32 vec, u32 fn, u32 a0, u32 a1 = 0, u32 a2 = 0) {
+        ctx.set_reg(reg::T1, fn);
+        ctx.set_reg(reg::A0, a0);
+        ctx.set_reg(reg::A1, a1);
+        ctx.set_reg(reg::A2, a2);
+        ctx.set_reg(reg::RA, 0x80010000u);
+        rt.handle_bios_vector(ctx, vec);
+        return ctx.get_reg(reg::V0);
+    };
+    const auto put_str = [&](u32 addr, const char* s) {
+        for (u32 i = 0;; ++i) { rt.write8(addr + i, static_cast<u8>(s[i])); if (!s[i]) break; }
+    };
+    put_str(0x80100000u, "bu00:BESLES-02754VAG00");
+    put_str(0x80100040u, "bu00:BESLES-02754*");
+    for (u32 i = 0; i < 256; ++i) rt.write8(0x80101000u + i, static_cast<u8>(i));
+
+    u32 fd = bios(0xB0, 0x32, 0x80100000u, 0x200u | (1u << 16)); // open(FCREAT, 1 block)
+    CHECK(fd >= 2u && fd != 0xFFFFFFFFu, "open(FCREAT) creates the save file");
+    bios(0xB0, 0x36, fd);
+    CHECK(bios(0xB0, 0x32, 0x80100000u, 0x200u | (1u << 16)) == 0xFFFFFFFFu, "Creating an existing save fails");
+
+    fd = bios(0xB0, 0x32, 0x80100000u, 2u); // open(FWRITE)
+    CHECK(bios(0xB0, 0x35, fd, 0x80101000u, 256u) == 256u, "write() 256 bytes");
+    bios(0xB0, 0x36, fd);
+    fd = bios(0xB0, 0x32, 0x80100000u, 1u); // open(FREAD)
+    CHECK(bios(0xB0, 0x34, fd, 0x80102000u, 256u) == 256u, "read() 256 bytes");
+    bios(0xB0, 0x36, fd);
+    bool same = true;
+    for (u32 i = 0; i < 256; ++i) same = same && rt.read8(0x80102000u + i) == static_cast<u8>(i);
+    CHECK(same, "Data read back matches what was written");
+
+    CHECK(bios(0xB0, 0x42, 0x80100040u, 0x80103000u) == 0x80103000u && rt.read8(0x80103000u) == 'B' &&
+              rt.read32(0x80103018u) == 8192u,
+          "firstfile() returns the save with its size");
+    CHECK(bios(0xB0, 0x43, 0x80103000u) == 0u, "nextfile() ends the listing");
+    CHECK(bios(0xB0, 0x45, 0x80100000u) == 1u && bios(0xB0, 0x42, 0x80100040u, 0x80103000u) == 0u, "erase() deletes the save");
+
+    rt.write8(0x80100002u, '1'); // "bu10:" = slot 2, no card inserted
+    CHECK(bios(0xB0, 0x32, 0x80100000u, 1u) == 0xFFFFFFFFu, "open() on an empty slot fails");
+    rt.flush_memory_cards();
+    std::filesystem::remove(path);
+}
+
 void test_gamepad_mapping() {
     using namespace vsport::pad;
 
@@ -649,6 +1042,24 @@ void test_gamepad_mapping() {
     u8 none[128]{};
     CHECK(map_dinput(0xFFFFFFFFu, 0, -900, none, sizeof(none)) == UP, "DInput stick: -Y is up");
     CHECK(map_dinput(0xFFFFFFFFu, 300, 300, none, sizeof(none)) == 0, "DInput stick inside deadzone is ignored");
+
+    // Button remapping
+    const ButtonMap def = default_button_map();
+    CHECK(apply_button_map(CROSS | L2 | UP, def) == (CROSS | L2 | UP), "Default button map is the identity");
+    ButtonMap swap = def;
+    swap[0] = 1; // PS1 Cross   <- physical Circle position
+    swap[1] = 0; // PS1 Circle  <- physical Cross position
+    CHECK(apply_button_map(CROSS, swap) == CIRCLE, "Swapped map: bottom button presses Circle");
+    CHECK(apply_button_map(CIRCLE | LEFT, swap) == (CROSS | LEFT), "Swapped map: right button presses Cross, D-pad unchanged");
+    ButtonMap dup = def;
+    dup[8] = 4; // START <- L1 as well (START's own button now unassigned)
+    CHECK(apply_button_map(L1, dup) == (L1 | START), "One physical button can press two PS1 buttons");
+    CHECK(apply_button_map(START, dup) == 0, "A physical button with no PS1 button does nothing");
+    ButtonMap off = def;
+    off[3] = -1;
+    CHECK(apply_button_map(TRIANGLE, off) == 0, "Unassigned PS1 button is never pressed");
+    CHECK(remap_index_from_name("r2") == 7 && remap_index_from_name("none") == -1 &&
+              remap_index_from_name("bogus") == -2, "Remap names round-trip");
 }
 
 } // namespace
@@ -658,6 +1069,13 @@ int main() {
     test_unaligned_lwl_lwr_swl_swr();
     test_mips_and_gte_decoder();
     test_gte_rtps_widescreen_and_nclip();
+    test_gpu_upscaled_queue_sees_old_textures();
+    test_gpu_upscaled_constant_uv_has_no_holes();
+    test_gpu_rim_light_modes();
+    test_gpu_mask_bit_and_self_texturing_sprite();
+    test_gpu_exact_vertex_positions();
+    test_gpu_perspective_textures();
+    test_gpu_display_off_is_black();
     test_gpu_otc_and_dma_linked_list();
     test_interpreter_and_lifter_pipeline();
     test_lifter_labeled_delay_slot_runs_once();
@@ -671,6 +1089,8 @@ int main() {
     test_gamepad_mapping();
     test_sio_pad_read_with_delayed_ack();
     test_sbi_subchannel_overrides();
+    test_memcard_filesystem();
+    test_bios_memcard_file_calls();
 
     if (g_failures == 0) {
         std::cout << "[PASS] Tum vsport cekirdek testleri basariyla gecti!\n";

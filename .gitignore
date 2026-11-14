@@ -1,5 +1,7 @@
 # Derleme çıktısı
 build/
+dist/
+VagrantStory.ini
 
 # Diskten üretilen rekompile kod (oyun koduna ait; paylaşılmaz, vs_recomp ile yeniden üretilir)
 generated_recomp/

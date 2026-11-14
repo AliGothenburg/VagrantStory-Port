@@ -2,6 +2,7 @@
 
 #include "vsport/cdrom_iso.hpp"
 #include "vsport/gte.hpp"
+#include "vsport/memcard.hpp"
 #include "vsport/psx_cdrom.hpp"
 #include "vsport/psx_exe.hpp"
 #include "vsport/psx_gpu.hpp"
@@ -58,6 +59,7 @@ public:
     [[nodiscard]] GteEngine& gte() noexcept { return gte_; }
     [[nodiscard]] const GteEngine& gte() const noexcept { return gte_; }
     [[nodiscard]] PsxGpu& gpu() noexcept { return gpu_; }
+    [[nodiscard]] PgxpCache& pgxp() noexcept { return pgxp_; }
     [[nodiscard]] const PsxGpu& gpu() const noexcept { return gpu_; }
     [[nodiscard]] PsxCdrom& cdrom() noexcept { return cdrom_; }
     [[nodiscard]] const PsxCdrom& cdrom() const noexcept { return cdrom_; }
@@ -65,6 +67,15 @@ public:
     [[nodiscard]] const PsxMdec& mdec() const noexcept { return mdec_; }
     [[nodiscard]] PsxSpu& spu() noexcept { return spu_; }
     [[nodiscard]] const PsxSpu& spu() const noexcept { return spu_; }
+
+    // Memory cards (slot 0 = card 1, slot 1 = card 2). Saved to the image file shortly after the
+    // game stops writing, and when the runtime is destroyed.
+    bool attach_memory_card(u32 slot, const std::filesystem::path& path, std::string* err = nullptr);
+    [[nodiscard]] MemoryCard& memory_card(u32 slot) noexcept { return memcards_[slot & 1u]; }
+    void flush_memory_cards();
+    ~PsxRuntime();
+    PsxRuntime(const PsxRuntime&)            = delete;
+    PsxRuntime& operator=(const PsxRuntime&) = delete;
 
     // Digital Controller State (16-bit active-low PS1 pad buttons: 0xFFFF = no buttons pressed)
     void set_pad_buttons(u16 buttons_active_low) noexcept { pad_buttons_ = buttons_active_low; }
@@ -177,6 +188,7 @@ private:
     std::array<u8, PSX_SCRATCHPAD_SIZE> scratchpad_{};
     std::vector<u8> bios_;
 
+    PgxpCache pgxp_; // Exact vertex positions (GTE -> GPU), upscaled picture only
     GteEngine gte_;
     PsxGpu gpu_;
     PsxCdrom cdrom_;
@@ -227,6 +239,26 @@ private:
     std::array<u32, 4> clear_rcnt_flags_{};
     u32 clear_pad_flag_ = 0;
     std::array<KernelEvent, 64> events_{};
+
+    // BIOS memory card HLE (_card_info / _card_read / _card_write ...) and the "bu" file device
+    bool bios_card_call(CpuContext& ctx, u32 table, u32 fn);
+    bool bios_file_call(CpuContext& ctx, u32 table, u32 fn);
+    void setup_kernel_tables();
+    std::array<MemoryCard, 2> memcards_{};
+    u32 card_chan_               = 0;
+    u32 memcard_last_write_vb_   = 0;
+
+    struct OpenFile {
+        bool used  = false;
+        u32 slot   = 0;
+        u32 mode   = 0;
+        u32 pos    = 0;
+        MemoryCard::FileInfo info;
+    };
+    std::array<OpenFile, 16> open_files_{}; // fd = index + 2 (0/1 are the TTY)
+    std::string find_pattern_;              // firstfile()/nextfile() search state
+    u32 find_slot_       = 0;
+    u32 find_next_block_ = 16;
     u32 rand_seed_ = 1;
 
     u32 heap_base_ = 0x80180000u;

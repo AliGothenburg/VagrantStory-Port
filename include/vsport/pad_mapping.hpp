@@ -2,7 +2,9 @@
 
 #include "vsport/types.hpp"
 
+#include <array>
 #include <cstddef>
+#include <string_view>
 
 // Host controller -> PS1 Digital Pad mapping (pure functions, no OS headers, unit-testable).
 // All mapping functions return ACTIVE-HIGH PS1 button bits; invert (~) before handing the
@@ -106,6 +108,47 @@ constexpr s32 DINPUT_STICK_DEADZONE = 500;   // of +-1000 (axis range set by the
     if (stick_x >  DINPUT_STICK_DEADZONE) p |= RIGHT;
     if (stick_x < -DINPUT_STICK_DEADZONE) p |= LEFT;
     return p;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Controller button remapping. map_xinput()/map_dinput() report buttons by POSITION (bottom face
+// button = Cross, ...). A ButtonMap then says, for every PS1 button, which physical button
+// presses it: map[i] = index into REMAP_BITS of the source button, or -1 for "unassigned".
+// The D-pad and the left stick are never remapped.
+// ---------------------------------------------------------------------------------------------
+constexpr std::size_t REMAP_COUNT = 12;
+constexpr u16 REMAP_BITS[REMAP_COUNT] = {CROSS, CIRCLE, SQUARE, TRIANGLE, L1, R1,
+                                         L2, R2, START, SELECT, L3, R3};
+// Settings-file names (ini keys are "pad_<name>", values are a name or "none")
+constexpr const char* REMAP_NAMES[REMAP_COUNT] = {"cross", "circle", "square", "triangle", "l1", "r1",
+                                                  "l2", "r2", "start", "select", "l3", "r3"};
+
+using ButtonMap = std::array<s8, REMAP_COUNT>;
+
+[[nodiscard]] constexpr ButtonMap default_button_map() noexcept {
+    ButtonMap m{};
+    for (std::size_t i = 0; i < REMAP_COUNT; ++i) m[i] = static_cast<s8>(i);
+    return m;
+}
+
+[[nodiscard]] constexpr u16 apply_button_map(u16 positional, const ButtonMap& map) noexcept {
+    u16 out = static_cast<u16>(positional & (UP | DOWN | LEFT | RIGHT));
+    for (std::size_t i = 0; i < REMAP_COUNT; ++i) {
+        const int src = map[i];
+        if (src >= 0 && src < static_cast<int>(REMAP_COUNT) && (positional & REMAP_BITS[src]) != 0) {
+            out = static_cast<u16>(out | REMAP_BITS[i]);
+        }
+    }
+    return out;
+}
+
+// Name -> REMAP_BITS index; -1 for "none"; -2 when the name is unknown
+[[nodiscard]] inline int remap_index_from_name(std::string_view name) noexcept {
+    if (name == "none") return -1;
+    for (std::size_t i = 0; i < REMAP_COUNT; ++i) {
+        if (name == REMAP_NAMES[i]) return static_cast<int>(i);
+    }
+    return -2;
 }
 
 } // namespace vsport::pad

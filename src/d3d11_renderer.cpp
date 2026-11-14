@@ -9,7 +9,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
+#include <vector>
 
 namespace vsport {
 
@@ -24,6 +26,10 @@ struct alignas(16) DisplayConstants {
     float view_size[2];   // Viewport (w, h) in screen pixels
     u32   shader_mode;    // 0 = Sharp, 1 = Bilinear, 2 = CRT
     u32   color_24bit;    // 1 = PS1 24-bit RGB888 mode, 0 = 15-bit RGB555
+    u32   use_hr;         // 1 = read the upscaled picture (internal resolution) from HrTex
+    u32   hr_w;           // Upscaled VRAM width / height (1024*N, 512*N)
+    u32   hr_h;
+    u32   pad0;
 };
 
 constexpr const char* kVramHlslSource = R"(
@@ -33,9 +39,15 @@ cbuffer DisplayCB : register(b0) {
     float2 view_size;
     uint   shader_mode;
     uint   color_24bit;
+    uint   use_hr;
+    uint   hr_w;
+    uint   hr_h;
+    uint   pad0;
 };
 
 Texture2D<uint> VramTex : register(t0);
+Texture2D<uint> HrTex   : register(t1);
+Texture2D<float4> HrRgba : register(t2);
 
 struct VSOut {
     float4 pos : SV_POSITION;
@@ -50,6 +62,15 @@ VSOut VSMain(uint vid : SV_VertexID) {
 }
 
 float3 ReadVram15(int x, int y) {
+    if (use_hr == 2u) {
+        // Upscaled picture drawn on the graphics card (RGBA8, alpha = mask bit)
+        return HrRgba.Load(int3(uint(x) % hr_w, uint(y) % hr_h, 0)).rgb;
+    }
+    if (use_hr != 0u) {
+        // Upscaled picture: 24-bit colour packed as 0x00BBGGRR
+        uint c = HrTex.Load(int3(uint(x) % hr_w, uint(y) % hr_h, 0));
+        return float3(float(c & 0xFFu), float((c >> 8) & 0xFFu), float((c >> 16) & 0xFFu)) * (1.0f / 255.0f);
+    }
     uint px = VramTex.Load(int3(x & 1023, y & 511, 0));
     float r = float(((px      ) & 31u) * 527u + 23u) * (1.0f / 16320.0f);
     float g = float(((px >>  5) & 31u) * 527u + 23u) * (1.0f / 16320.0f);
@@ -144,6 +165,34 @@ struct D3D11Renderer::Impl {
     ComPtr<ID3D11RenderTargetView> rtv;
     ComPtr<ID3D11Texture2D>        vram_tex;
     ComPtr<ID3D11ShaderResourceView> vram_srv;
+    ComPtr<ID3D11Texture2D>        hr_tex;   // Upscaled picture (1024*N x 512*N), created on demand
+    ComPtr<ID3D11ShaderResourceView> hr_srv;
+    u32 hr_scale = 0;
+
+    bool ensure_hr_texture(u32 scale) {
+        if (hr_tex && hr_scale == scale) return true;
+        hr_srv.Reset();
+        hr_tex.Reset();
+        hr_scale = 0;
+        D3D11_TEXTURE2D_DESC td{};
+        td.Width            = PsxGpu::VRAM_WIDTH * scale;
+        td.Height           = PsxGpu::VRAM_HEIGHT * scale;
+        td.MipLevels        = 1;
+        td.ArraySize        = 1;
+        td.Format           = DXGI_FORMAT_R32_UINT; // 24-bit colour 0x00BBGGRR
+        td.SampleDesc.Count = 1;
+        td.Usage            = D3D11_USAGE_DYNAMIC;
+        td.BindFlags        = D3D11_BIND_SHADER_RESOURCE;
+        td.CPUAccessFlags   = D3D11_CPU_ACCESS_WRITE;
+        if (FAILED(device->CreateTexture2D(&td, nullptr, &hr_tex)) ||
+            FAILED(device->CreateShaderResourceView(hr_tex.Get(), nullptr, &hr_srv))) {
+            hr_srv.Reset();
+            hr_tex.Reset();
+            return false;
+        }
+        hr_scale = scale;
+        return true;
+    }
     ComPtr<ID3D11VertexShader>     vs;
     ComPtr<ID3D11PixelShader>      ps;
     ComPtr<ID3D11Buffer>           cbuffer;
@@ -168,6 +217,14 @@ D3D11Renderer::D3D11Renderer() : impl_(new Impl()) {}
 D3D11Renderer::~D3D11Renderer() {
     shutdown();
     delete impl_;
+}
+
+void* D3D11Renderer::device_handle() const noexcept {
+#ifdef _WIN32
+    return initialized_ ? impl_->device.Get() : nullptr;
+#else
+    return nullptr;
+#endif
 }
 
 const char* D3D11Renderer::shader_mode_name() const noexcept {
@@ -312,6 +369,9 @@ void D3D11Renderer::shutdown() {
         impl_->context->ClearState();
     }
     impl_->cbuffer.Reset();
+    impl_->hr_srv.Reset();
+    impl_->hr_tex.Reset();
+    impl_->hr_scale = 0;
     impl_->ps.Reset();
     impl_->vs.Reset();
     impl_->vram_srv.Reset();
@@ -342,13 +402,52 @@ void D3D11Renderer::resize(u32 width, u32 height) {
 #endif
 }
 
-void D3D11Renderer::present_vram(const PsxGpu& gpu, bool full_vram, bool widescreen, bool vsync) {
+void D3D11Renderer::present_vram(const PsxGpu& gpu, bool full_vram, float aspect, bool vsync) {
 #ifdef _WIN32
     if (!initialized_ || !impl_->rtv) return;
 
-    // 1. Upload 1024x512 RGB555 VRAM directly to GPU R16_UINT texture
+    if (!full_vram && !gpu.display_enabled()) {
+        // The game switched the video output off (GP1 03h): a TV shows black
+        const float black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+        impl_->context->ClearRenderTargetView(impl_->rtv.Get(), black);
+        impl_->swapchain->Present(vsync ? 1u : 0u, 0u);
+        return;
+    }
+
+    // 1. Upload the picture: the upscaled display region at internal resolution when available
+    //    (15-bit display), otherwise the 1024x512 RGB555 VRAM to the R16_UINT texture
+    const u32 s = gpu.internal_scale();
+    const bool hr_mode = s > 1u && !full_vram && !gpu.is_24bit_display();
+    // A graphics card backend on this device: present its picture directly (no CPU copy)
+    ID3D11ShaderResourceView* gpu_view = nullptr;
+    if (hr_mode) {
+        if (HrBackend* b = gpu.hr_backend(); b && b->gpu_device() == impl_->device.Get()) {
+            gpu_view = static_cast<ID3D11ShaderResourceView*>(b->gpu_picture_view());
+        }
+    }
+    const bool use_hr = hr_mode && (gpu_view != nullptr ||
+                        (gpu.hr_vram().size() == static_cast<std::size_t>(PsxGpu::VRAM_WIDTH * s) * (PsxGpu::VRAM_HEIGHT * s) &&
+                         impl_->ensure_hr_texture(s)));
     D3D11_MAPPED_SUBRESOURCE mapped{};
-    if (SUCCEEDED(impl_->context->Map(impl_->vram_tex.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
+    if (use_hr && gpu_view) {
+        // Nothing to upload
+    } else if (use_hr) {
+        if (SUCCEEDED(impl_->context->Map(impl_->hr_tex.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
+            const u32 hw = PsxGpu::VRAM_WIDTH * s, hh = PsxGpu::VRAM_HEIGHT * s;
+            const u32 x0 = (gpu.display_vram_x() * s) % hw;
+            const u32 y0 = gpu.display_vram_y() * s;
+            const u32 w  = std::min(gpu.display_width() * s, hw - x0);
+            const u32 h  = std::min(gpu.display_height() * s, hh);
+            const u32* src = gpu.hr_vram().data();
+            u8* dst        = static_cast<u8*>(mapped.pData);
+            for (u32 y = 0; y < h; ++y) {
+                const u32 ry = (y0 + y) % hh;
+                std::memcpy(dst + static_cast<std::size_t>(ry) * mapped.RowPitch + x0 * sizeof(u32),
+                            src + static_cast<std::size_t>(ry) * hw + x0, w * sizeof(u32));
+            }
+            impl_->context->Unmap(impl_->hr_tex.Get(), 0);
+        }
+    } else if (SUCCEEDED(impl_->context->Map(impl_->vram_tex.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
         const u16* src      = gpu.vram().data();
         u8* dst             = static_cast<u8*>(mapped.pData);
         const std::size_t row_bytes = PsxGpu::VRAM_WIDTH * sizeof(u16);
@@ -358,16 +457,29 @@ void D3D11Renderer::present_vram(const PsxGpu& gpu, bool full_vram, bool widescr
         impl_->context->Unmap(impl_->vram_tex.Get(), 0);
     }
 
-    // 2. Compute aspect-preserving viewport (4:3, 16:9 widescreen, or 2:1 full VRAM)
+    // 2. Compute aspect-preserving viewport (chosen aspect, whole window, or 2:1 full VRAM)
     const float win_w = static_cast<float>(std::max<u32>(1u, impl_->backbuf_w));
     const float win_h = static_cast<float>(std::max<u32>(1u, impl_->backbuf_h));
-    const float target_aspect = full_vram ? 2.0f : (widescreen ? (16.0f / 9.0f) : (4.0f / 3.0f));
+    const bool fill = !full_vram && aspect <= 0.0f;
+    const float target_aspect = full_vram ? 2.0f : (fill ? win_w / win_h : aspect);
 
     float vp_w = win_w;
     float vp_h = win_w / target_aspect;
     if (vp_h > win_h) {
         vp_h = win_h;
         vp_w = win_h * target_aspect;
+    }
+    // Integer scaling only makes sense for the native 1x picture (equal-size PS1 pixels); at a
+    // higher internal resolution it would just add black borders, so it is skipped there.
+    if (integer_scaling_ && !full_vram && !fill && !use_hr) {
+        const float src_h = static_cast<float>(std::max<u32>(1u, gpu.display_height()));
+        const float k     = std::max(1.0f, std::floor(vp_h / src_h));
+        vp_h = src_h * k;
+        vp_w = vp_h * target_aspect;
+        if (vp_w > win_w) { // Very narrow window: fall back to the largest fit
+            vp_w = win_w;
+            vp_h = win_w / target_aspect;
+        }
     }
     const float vp_x = std::floor((win_w - vp_w) * 0.5f);
     const float vp_y = std::floor((win_h - vp_h) * 0.5f);
@@ -376,14 +488,19 @@ void D3D11Renderer::present_vram(const PsxGpu& gpu, bool full_vram, bool widescr
     D3D11_MAPPED_SUBRESOURCE cb_map{};
     if (SUCCEEDED(impl_->context->Map(impl_->cbuffer.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &cb_map))) {
         auto* cb = static_cast<DisplayConstants*>(cb_map.pData);
-        cb->disp_origin[0] = full_vram ? 0.0f : static_cast<float>(gpu.display_vram_x());
-        cb->disp_origin[1] = full_vram ? 0.0f : static_cast<float>(gpu.display_vram_y());
-        cb->disp_size[0]   = full_vram ? static_cast<float>(PsxGpu::VRAM_WIDTH)  : static_cast<float>(std::max<u32>(1u, gpu.display_width()));
-        cb->disp_size[1]   = full_vram ? static_cast<float>(PsxGpu::VRAM_HEIGHT) : static_cast<float>(std::max<u32>(1u, gpu.display_height()));
+        const float k      = use_hr ? static_cast<float>(s) : 1.0f; // Display coords in upscaled pixels
+        cb->disp_origin[0] = full_vram ? 0.0f : static_cast<float>(gpu.display_vram_x()) * k;
+        cb->disp_origin[1] = full_vram ? 0.0f : static_cast<float>(gpu.display_vram_y()) * k;
+        cb->disp_size[0]   = full_vram ? static_cast<float>(PsxGpu::VRAM_WIDTH)  : static_cast<float>(std::max<u32>(1u, gpu.display_width())) * k;
+        cb->disp_size[1]   = full_vram ? static_cast<float>(PsxGpu::VRAM_HEIGHT) : static_cast<float>(std::max<u32>(1u, gpu.display_height())) * k;
         cb->view_size[0]   = vp_w;
         cb->view_size[1]   = vp_h;
         cb->shader_mode    = static_cast<u32>(shader_mode_);
         cb->color_24bit    = (!full_vram && gpu.is_24bit_display()) ? 1u : 0u;
+        cb->use_hr         = use_hr ? (gpu_view ? 2u : 1u) : 0u;
+        cb->hr_w           = PsxGpu::VRAM_WIDTH * std::max<u32>(1u, s);
+        cb->hr_h           = PsxGpu::VRAM_HEIGHT * std::max<u32>(1u, s);
+        cb->pad0           = 0u;
         impl_->context->Unmap(impl_->cbuffer.Get(), 0);
     }
 
@@ -406,17 +523,48 @@ void D3D11Renderer::present_vram(const PsxGpu& gpu, bool full_vram, bool widescr
     impl_->context->VSSetShader(impl_->vs.Get(), nullptr, 0);
     impl_->context->PSSetShader(impl_->ps.Get(), nullptr, 0);
     impl_->context->PSSetConstantBuffers(0, 1, impl_->cbuffer.GetAddressOf());
-    impl_->context->PSSetShaderResources(0, 1, impl_->vram_srv.GetAddressOf());
+    ID3D11ShaderResourceView* srvs[3] = {impl_->vram_srv.Get(), (use_hr && !gpu_view) ? impl_->hr_srv.Get() : impl_->vram_srv.Get(),
+                                         gpu_view};
+    impl_->context->PSSetShaderResources(0, 3, srvs);
 
     impl_->context->Draw(3, 0);
 
-    ID3D11ShaderResourceView* null_srv = nullptr;
-    impl_->context->PSSetShaderResources(0, 1, &null_srv);
+    ID3D11ShaderResourceView* null_srvs[3] = {nullptr, nullptr, nullptr};
+    impl_->context->PSSetShaderResources(0, 3, null_srvs);
+    if (!dump_path_.empty()) {
+        // Diagnostics: copy the finished backbuffer (BGRA8) to the CPU and save it as PPM
+        ComPtr<ID3D11Texture2D> backbuf, staging;
+        if (SUCCEEDED(impl_->swapchain->GetBuffer(0, IID_PPV_ARGS(&backbuf)))) {
+            D3D11_TEXTURE2D_DESC td{};
+            backbuf->GetDesc(&td);
+            td.Usage = D3D11_USAGE_STAGING; td.BindFlags = 0; td.CPUAccessFlags = D3D11_CPU_ACCESS_READ; td.MiscFlags = 0;
+            D3D11_MAPPED_SUBRESOURCE m{};
+            if (SUCCEEDED(impl_->device->CreateTexture2D(&td, nullptr, &staging))) {
+                impl_->context->CopyResource(staging.Get(), backbuf.Get());
+                if (SUCCEEDED(impl_->context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &m))) {
+                    if (FILE* f = std::fopen(dump_path_.c_str(), "wb")) {
+                        std::fprintf(f, "P6\n%u %u\n255\n", td.Width, td.Height);
+                        std::vector<u8> row(td.Width * 3u);
+                        for (u32 y = 0; y < td.Height; ++y) {
+                            const u8* src = static_cast<const u8*>(m.pData) + static_cast<std::size_t>(y) * m.RowPitch;
+                            for (u32 x = 0; x < td.Width; ++x) {
+                                row[x * 3] = src[x * 4 + 2]; row[x * 3 + 1] = src[x * 4 + 1]; row[x * 3 + 2] = src[x * 4];
+                            }
+                            std::fwrite(row.data(), 1, row.size(), f);
+                        }
+                        std::fclose(f);
+                    }
+                    impl_->context->Unmap(staging.Get(), 0);
+                }
+            }
+        }
+        dump_path_.clear();
+    }
     impl_->swapchain->Present(vsync ? 1u : 0u, 0u);
 #else
     (void)gpu;
     (void)full_vram;
-    (void)widescreen;
+    (void)aspect;
     (void)vsync;
 #endif
 }

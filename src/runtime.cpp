@@ -41,6 +41,8 @@ static u32 g_call_pos = 0;
 
 PsxRuntime::PsxRuntime(u32 ram_size)
     : ram_(ram_size, 0), bios_(PSX_BIOS_SIZE, 0) {
+    gte_.set_pgxp(&pgxp_);
+    gpu_.set_pgxp(&pgxp_);
     reset();
 }
 
@@ -110,6 +112,10 @@ void PsxRuntime::reset() {
         store_le32(&ram_[vec], 0x03E00008u);     // jr $ra
         store_le32(&ram_[vec + 4], 0x00000000u); // nop
     }
+    setup_kernel_tables();
+    open_files_.fill(OpenFile{});
+    find_pattern_.clear();
+    find_next_block_ = 16;
 }
 
 void PsxRuntime::bump_ram_range_epoch(u32 paddr, std::size_t len) noexcept {
@@ -957,9 +963,15 @@ void PsxRuntime::tick_hardware(CpuContext& ctx, u64 elapsed_cycles) {
     if (vblank_accum_ >= VBLANK_PERIOD) {
         vblank_accum_ -= VBLANK_PERIOD;
         ++vblank_frames_;
+        // Save memory card changes to disk once the game has stopped writing for ~0.5 s
+        if ((memcards_[0].dirty() || memcards_[1].dirty()) && vblank_frames_ - memcard_last_write_vb_ > 25u) {
+            flush_memory_cards();
+        }
         i_stat_ |= (1u << 0); // IRQ0 VBlank
         deliver_kernel_event(0xF0000001u, 0x0002u);
         deliver_kernel_event(0xF2000003u, 0x0002u);
+        gpu_.flush_hr(); // Finish the upscaled picture before the host presents it
+        pgxp_.begin_frame();
         if (on_vblank_) {
             on_vblank_();
         }
@@ -1248,6 +1260,12 @@ bool PsxRuntime::handle_bios_vector(CpuContext& ctx, u32 masked_pc) {
     const u32 a1 = ctx.get_reg(reg::A1);
     const u32 a2 = ctx.get_reg(reg::A2);
     const u32 a3 = ctx.get_reg(reg::A3);
+
+    if (bios_card_call(ctx, masked_pc, fn) || bios_file_call(ctx, masked_pc, fn)) {
+        ctx.pc      = ctx.get_reg(reg::RA);
+        ctx.next_pc = ctx.pc + 4u;
+        return true;
+    }
 
     if (masked_pc == 0xA0u) {
         switch (fn) {
@@ -1593,6 +1611,289 @@ bool PsxRuntime::handle_bios_vector(CpuContext& ctx, u32 masked_pc) {
     ctx.pc      = ctx.get_reg(reg::RA);
     ctx.next_pc = ctx.pc + 4u;
     return true;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Memory cards
+// ---------------------------------------------------------------------------------------------
+
+PsxRuntime::~PsxRuntime() {
+    flush_memory_cards();
+}
+
+bool PsxRuntime::attach_memory_card(u32 slot, const std::filesystem::path& path, std::string* err) {
+    return memcards_[slot & 1u].open(path, err);
+}
+
+void PsxRuntime::flush_memory_cards() {
+    for (auto& card : memcards_) {
+        card.flush();
+    }
+}
+
+// BIOS memory card functions, completing at once. Like the real BIOS they report through the
+// card events: HwCARD (0xF0000011) and SwCARD (0xF4000001) with EvSpIOE (0x0004) on success, or
+// SwCARD EvSpTIMOUT (0x0100) when no card is inserted. Ports: 0x00 = slot 1, 0x10 = slot 2.
+bool PsxRuntime::bios_card_call(CpuContext& ctx, u32 table, u32 fn) {
+    constexpr u32 HW_CARD = 0xF0000011u, SW_CARD = 0xF4000001u;
+    constexpr u32 EV_IOE = 0x0004u, EV_TIMEOUT = 0x0100u;
+    const u32 a0 = ctx.get_reg(reg::A0), a1 = ctx.get_reg(reg::A1), a2 = ctx.get_reg(reg::A2);
+
+    const auto port_card = [&](u32 port) -> MemoryCard* {
+        const u32 slot = (port >> 4) & 0x0Fu;
+        if (slot > 1u || (port & 0x0Fu) != 0u) return nullptr; // No multitap
+        return memcards_[slot].is_open() ? &memcards_[slot] : nullptr;
+    };
+    const auto complete = [&](bool ok) {
+        deliver_kernel_event(HW_CARD, EV_IOE);
+        deliver_kernel_event(SW_CARD, ok ? EV_IOE : EV_TIMEOUT);
+    };
+
+    if (table == 0xA0u) {
+        switch (fn) {
+            case 0xAB: // _card_info(port)
+            case 0xAC: // _card_load(port)
+                card_chan_ = a0;
+                complete(port_card(a0) != nullptr);
+                ctx.set_reg(reg::V0, 1);
+                return true;
+            default:
+                return false;
+        }
+    }
+    if (table != 0xB0u) return false;
+
+    switch (fn) {
+        case 0x4A: // InitCard(pad_enable)
+        case 0x4B: // StartCard()
+        case 0x4C: // StopCard()
+            ctx.set_reg(reg::V0, 1);
+            return true;
+        case 0x4E:   // _card_write(port, sector, src)
+        case 0x4F: { // _card_read(port, sector, dst)
+            card_chan_ = a0;
+            MemoryCard* card = port_card(a0);
+            std::array<u8, MemoryCard::SECTOR_SIZE> buf{};
+            bool ok = false;
+            if (card) {
+                if (fn == 0x4E) {
+                    for (u32 i = 0; i < MemoryCard::SECTOR_SIZE; ++i) buf[i] = read8(a2 + i);
+                    ok = card->write_sector(a1, buf.data());
+                    if (ok) memcard_last_write_vb_ = vblank_frames_;
+                } else {
+                    ok = card->read_sector(a1, buf.data());
+                    if (ok) {
+                        for (u32 i = 0; i < MemoryCard::SECTOR_SIZE; ++i) write8(a2 + i, buf[i]);
+                    }
+                }
+            }
+            complete(ok);
+            ctx.set_reg(reg::V0, ok ? 1u : 0u);
+            return true;
+        }
+        case 0x50: // _new_card()
+            ctx.set_reg(reg::V0, 1);
+            return true;
+        case 0x58: // _card_chan()
+            ctx.set_reg(reg::V0, card_chan_);
+            return true;
+        case 0x5C: // _card_status(slot): ready
+        case 0x5D: // _card_wait(slot)
+            ctx.set_reg(reg::V0, 1);
+            return true;
+        default:
+            return false;
+    }
+}
+
+// The real BIOS keeps its device table (DCB) and file table (FCB) in kernel RAM and publishes them
+// at 0x150/0x154 and 0x140/0x144. PsyQ's libapi walks the DCB to patch the memory card ("bu")
+// device before calling firstfile(), and reports "no files" when it cannot find it. Build an
+// equivalent table; its function pointers lead to a harmless "jr $ra" stub because the file
+// calls themselves are handled by bios_file_call().
+void PsxRuntime::setup_kernel_tables() {
+    constexpr u32 DCB_BASE = 0x6000u, STR_BASE = 0x6100u, STUB = 0x6200u, FCB_BASE = 0x6300u;
+    constexpr u32 DCB_SIZE = 0x50u, FCB_SIZE = 0x2Cu, FCB_COUNT = 16u;
+    struct Dev { const char* name; u32 flags; u32 sector; };
+    constexpr Dev devices[] = {{"tty", 0x01u, 1u}, {"cdrom", 0x14u, 0x800u}, {"bu", 0x14u, 0x80u}};
+
+    std::fill(ram_.begin() + DCB_BASE, ram_.begin() + FCB_BASE + FCB_SIZE * FCB_COUNT, static_cast<u8>(0));
+    store_le32(&ram_[STUB], 0x03E00008u); // jr $ra
+    store_le32(&ram_[STUB + 4], 0x00000000u);
+
+    u32 str = STR_BASE;
+    for (u32 i = 0; i < std::size(devices); ++i) {
+        const u32 dcb = DCB_BASE + i * DCB_SIZE;
+        const std::size_t len = std::strlen(devices[i].name);
+        std::memcpy(&ram_[str], devices[i].name, len + 1);
+        store_le32(&ram_[dcb + 0x00], 0x80000000u | str);         // device name
+        store_le32(&ram_[dcb + 0x04], devices[i].flags);
+        store_le32(&ram_[dcb + 0x08], devices[i].sector);
+        store_le32(&ram_[dcb + 0x0C], 0x80000000u | str);         // description
+        for (u32 off = 0x10; off < DCB_SIZE; off += 4) {
+            store_le32(&ram_[dcb + off], 0x80000000u | STUB);     // init/open/.../testdevice
+        }
+        str += static_cast<u32>(len + 1 + 3) & ~3u;
+    }
+    store_le32(&ram_[0x140], 0x80000000u | FCB_BASE);
+    store_le32(&ram_[0x144], FCB_SIZE * FCB_COUNT);
+    store_le32(&ram_[0x150], 0x80000000u | DCB_BASE);
+    store_le32(&ram_[0x154], DCB_SIZE * static_cast<u32>(std::size(devices)));
+    bump_ram_range_epoch(0x140, 0x18);
+    bump_ram_range_epoch(DCB_BASE, FCB_BASE + FCB_SIZE * FCB_COUNT - DCB_BASE);
+}
+
+// BIOS file functions for the memory card device ("bu00:" = slot 1, "bu10:" = slot 2), working
+// directly on the card image. Calls are synchronous; FASYNC (0x8000) opens additionally get the
+// card completion events. Other devices are not emulated (open fails).
+bool PsxRuntime::bios_file_call(CpuContext& ctx, u32 table, u32 fn) {
+    // A0:00..04 are the same calls as B0:32..36
+    if (table == 0xA0u && fn <= 0x04u) {
+        fn += 0x32u;
+    } else if (table != 0xB0u) {
+        return false;
+    }
+    const u32 a0 = ctx.get_reg(reg::A0), a1 = ctx.get_reg(reg::A1), a2 = ctx.get_reg(reg::A2);
+
+    // "bu00:NAME" -> slot + NAME
+    const auto parse = [&](u32 addr, u32& slot, std::string& name) {
+        const std::string full = read_cstr(addr, 64);
+        if (full.size() < 5 || full.compare(0, 2, "bu") != 0 || full[4] != ':') return false;
+        slot = static_cast<u32>(full[2] - '0');
+        if (slot > 1u || full[3] != '0' || !memcards_[slot].is_open()) return false;
+        name = full.substr(5);
+        return true;
+    };
+    const auto file_of = [&](u32 fd) -> OpenFile* {
+        return (fd >= 2u && fd < 2u + open_files_.size() && open_files_[fd - 2u].used) ? &open_files_[fd - 2u] : nullptr;
+    };
+    const auto write_direntry = [&](u32 dst, const MemoryCard::FileInfo& f) {
+        // struct DIRENTRY { char name[20]; long attr; long size; DIRENTRY* next; long head; char system[4]; }
+        for (u32 i = 0; i < 20; ++i) write8(dst + i, i < f.name.size() ? static_cast<u8>(f.name[i]) : 0u);
+        write32(dst + 0x14, 0x50u);
+        write32(dst + 0x18, f.size);
+        write32(dst + 0x1C, 0u);
+        write32(dst + 0x20, f.first_block);
+        write32(dst + 0x24, 0u);
+    };
+    const auto find_from = [&](u32 dst, u32 from_block) -> u32 {
+        MemoryCard::FileInfo f;
+        if (!memcards_[find_slot_].find_file(find_pattern_, from_block, f)) {
+            find_next_block_ = 16;
+            return 0u;
+        }
+        find_next_block_ = f.first_block + 1u;
+        write_direntry(dst, f);
+        return dst;
+    };
+
+    switch (fn) {
+        case 0x32: { // open(name, accessmode)
+            u32 slot = 0;
+            std::string name;
+            s32 fd = -1;
+            if (parse(a0, slot, name)) {
+                MemoryCard::FileInfo info;
+                bool ok = false;
+                if ((a1 & 0x200u) != 0) { // FCREAT: size in blocks in the upper 16 bits
+                    const u32 blocks = std::max<u32>(1u, (a1 >> 16) & 0xFFFFu);
+                    ok = memcards_[slot].create_file(name, blocks, info);
+                    if (ok) memcard_last_write_vb_ = vblank_frames_;
+                } else {
+                    ok = memcards_[slot].find_file(name, 1, info) && info.name == name;
+                }
+                for (u32 i = 0; ok && i < open_files_.size(); ++i) {
+                    if (!open_files_[i].used) {
+                        open_files_[i] = OpenFile{true, slot, a1, 0u, info};
+                        fd = static_cast<s32>(i + 2u);
+                        break;
+                    }
+                }
+            }
+            ctx.set_reg(reg::V0, static_cast<u32>(fd));
+            return true;
+        }
+        case 0x33: { // lseek(fd, offset, seektype)
+            OpenFile* f = file_of(a0);
+            if (!f) { ctx.set_reg(reg::V0, 0xFFFFFFFFu); return true; }
+            f->pos = (a2 == 1u) ? f->pos + a1 : a1;
+            ctx.set_reg(reg::V0, f->pos);
+            return true;
+        }
+        case 0x34:   // read(fd, dst, length)
+        case 0x35: { // write(fd, src, length)
+            OpenFile* f = file_of(a0);
+            if (!f) { ctx.set_reg(reg::V0, 0xFFFFFFFFu); return true; }
+            std::vector<u8> buf(a2);
+            u32 done = 0;
+            MemoryCard& card = memcards_[f->slot];
+            if (fn == 0x34) {
+                done = card.read_file(f->info, f->pos, buf.data(), a2);
+                for (u32 i = 0; i < done; ++i) write8(a1 + i, buf[i]);
+            } else {
+                for (u32 i = 0; i < a2; ++i) buf[i] = read8(a1 + i);
+                done = card.write_file(f->info, f->pos, buf.data(), a2);
+                if (done) memcard_last_write_vb_ = vblank_frames_;
+            }
+            f->pos += done;
+            if ((f->mode & 0x8000u) != 0) { // FASYNC: completion is reported through the card events
+                deliver_kernel_event(0xF0000011u, 0x0004u);
+                deliver_kernel_event(0xF4000001u, 0x0004u);
+            }
+            ctx.set_reg(reg::V0, done);
+            return true;
+        }
+        case 0x36: { // close(fd)
+            OpenFile* f = file_of(a0);
+            if (f) *f = OpenFile{};
+            ctx.set_reg(reg::V0, f ? a0 : 0xFFFFFFFFu);
+            return true;
+        }
+        case 0x41: { // format(devicename)
+            const std::string dev = read_cstr(a0, 16);
+            const u32 slot = (dev.size() >= 3 && dev.compare(0, 2, "bu") == 0) ? static_cast<u32>(dev[2] - '0') : 9u;
+            const bool ok = slot <= 1u && memcards_[slot].is_open();
+            if (ok) {
+                memcards_[slot].format();
+                memcard_last_write_vb_ = vblank_frames_;
+            }
+            ctx.set_reg(reg::V0, ok ? 1u : 0u);
+            return true;
+        }
+        case 0x42: { // firstfile(name_pattern, direntry)
+            u32 slot = 0;
+            std::string pattern;
+            if (!parse(a0, slot, pattern)) {
+                ctx.set_reg(reg::V0, 0);
+                return true;
+            }
+            find_slot_    = slot;
+            find_pattern_ = pattern.empty() ? std::string("*") : pattern;
+            ctx.set_reg(reg::V0, find_from(a1, 1u));
+            return true;
+        }
+        case 0x43: // nextfile(direntry)
+            ctx.set_reg(reg::V0, find_next_block_ <= MemoryCard::BLOCK_COUNT ? find_from(a0, find_next_block_) : 0u);
+            return true;
+        case 0x44: { // rename(old, new)
+            u32 s0 = 0, s1 = 0;
+            std::string n0, n1;
+            const bool ok = parse(a0, s0, n0) && parse(a1, s1, n1) && s0 == s1 && memcards_[s0].rename_file(n0, n1);
+            if (ok) memcard_last_write_vb_ = vblank_frames_;
+            ctx.set_reg(reg::V0, ok ? 1u : 0u);
+            return true;
+        }
+        case 0x45: { // erase(name)
+            u32 slot = 0;
+            std::string name;
+            const bool ok = parse(a0, slot, name) && memcards_[slot].erase_file(name);
+            if (ok) memcard_last_write_vb_ = vblank_frames_;
+            ctx.set_reg(reg::V0, ok ? 1u : 0u);
+            return true;
+        }
+        default:
+            return false;
+    }
 }
 
 void PsxRuntime::handle_syscall(CpuContext& ctx) {

@@ -4,7 +4,6 @@
 #include <array>
 #include <fstream>
 #include <utility>
-
 namespace vsport {
 
 namespace {
@@ -27,6 +26,7 @@ u16 blend_psx_abr(u16 bg555, u8 fr, u8 fg, u8 fb, u32 abr) noexcept {
     }
     return static_cast<u16>(((r >> 3) & 0x1F) | (((g >> 3) & 0x1F) << 5) | (((b >> 3) & 0x1F) << 10));
 }
+
 
 u32 gp0_command_length(u8 op) noexcept {
     if (op >= 0x20 && op <= 0x3F) {
@@ -71,6 +71,8 @@ PsxGpu::PsxGpu() : vram_(VRAM_WIDTH * VRAM_HEIGHT, 0) {
 
 void PsxGpu::reset() {
     std::fill(vram_.begin(), vram_.end(), static_cast<u16>(0));
+    if (hr_) hr_->clear();
+    hr_batch_.clear();
     fifo_.clear();
     expected_words_   = 0;
     mode_             = Gp0Mode::Command;
@@ -78,6 +80,8 @@ void PsxGpu::reset() {
     gpustat_          = 0x1C802000u; // Ready to receive cmd, VRAM->CPU ready, DMA block ready
     texpage_          = 0;
     texwin_           = 0;
+    mask_set_         = false;
+    mask_check_       = false;
     clip_x1_          = 0;
     clip_y1_          = 0;
     clip_x2_          = 1023;
@@ -192,11 +196,12 @@ void PsxGpu::write_gp0(u32 word) {
     if (mode_ == Gp0Mode::CpuToVramCopy) {
         for (int half = 0; half < 2 && mode_ == Gp0Mode::CpuToVramCopy; ++half) {
             const u16 px = static_cast<u16>((word >> (half * 16)) & 0xFFFFu);
-            write_vram_pixel(xfer_x_ + xfer_cx_, xfer_y_ + xfer_cy_, px);
+            plot_vram_pixel(xfer_x_ + xfer_cx_, xfer_y_ + xfer_cy_, px);
             if (++xfer_cx_ >= xfer_w_) {
                 xfer_cx_ = 0;
                 if (++xfer_cy_ >= xfer_h_) {
                     mode_ = Gp0Mode::Command;
+                    hr_sync_rect(xfer_x_, xfer_y_, xfer_w_, xfer_h_); // Uploaded image -> upscaled copy
                 }
             }
         }
@@ -256,8 +261,228 @@ u16 PsxGpu::sample_texture(u8 u, u8 v, u16 clut_word, u16 texpage_word) const no
     return read_vram_pixel(tp_x + u, tp_y + v);
 }
 
+// Internal resolution upscaling: the native 1024x512 VRAM stays authoritative (CPU reads, DMA,
+// texture sampling). A display-only N x copy is drawn by an HrBackend (hr_backend.hpp) from the
+// queue of primitives built here.
+
+
+PsxGpu::~PsxGpu() = default;
+
+namespace {
+struct TexRects { s32 tx1, ty1, tx2, ty2, cx1, cy1, cx2, cy2; bool has_clut; };
+// VRAM areas a textured primitive reads: its texture page and (paletted modes) its CLUT row
+TexRects tex_rects(u16 texpage, u16 clut) noexcept {
+    const u32 depth = (texpage >> 7) & 3u;
+    TexRects r{};
+    r.tx1 = static_cast<s32>((texpage & 0x0Fu) * 64u);
+    r.ty1 = static_cast<s32>(((texpage >> 4) & 1u) * 256u);
+    r.tx2 = r.tx1 + (depth == 0 ? 64 : depth == 1 ? 128 : 256) - 1;
+    r.ty2 = r.ty1 + 255;
+    r.has_clut = depth < 2u;
+    r.cx1 = static_cast<s32>((clut & 0x3Fu) * 16u);
+    r.cy1 = r.cy2 = static_cast<s32>((clut >> 6) & 0x1FFu);
+    r.cx2 = r.cx1 + (depth == 0 ? 15 : 255);
+    return r;
+}
+bool rects_overlap(s32 ax1, s32 ay1, s32 ax2, s32 ay2, s32 bx1, s32 by1, s32 bx2, s32 by2) noexcept {
+    return ax1 <= bx2 && ax2 >= bx1 && ay1 <= by2 && ay2 >= by1;
+}
+} // namespace
+
+namespace {
+// VRAM split into 64x16 cells: row = y / 16 (32 rows), bit = x / 64 (16 columns)
+u16 cell_cols(s32 x1, s32 x2) noexcept {
+    x1 = std::clamp(x1, 0, 1023);
+    x2 = std::clamp(x2, 0, 1023);
+    const u32 c1 = static_cast<u32>(x1) / 64u, c2 = static_cast<u32>(x2) / 64u;
+    return static_cast<u16>(((2u << c2) - 1u) & ~((1u << c1) - 1u));
+}
+} // namespace
+
+void PsxGpu::hr_mark_tex_cells(s32 x1, s32 y1, s32 x2, s32 y2) {
+    const u16 cols = cell_cols(x1, x2);
+    const s32 r1 = std::clamp(y1, 0, 511) / 16, r2 = std::clamp(y2, 0, 511) / 16;
+    for (s32 r = r1; r <= r2; ++r) tex_cells_[static_cast<std::size_t>(r)] |= cols;
+    batch_has_tex_ = true;
+}
+
+void PsxGpu::hr_guard_write(s32 x1, s32 y1, s32 x2, s32 y2) {
+    // Queued primitives sample textures from the native VRAM only when the queue is drawn, so
+    // any native write into an area they read must wait until they have been drawn.
+    if (hr_batch_.empty() || !batch_has_tex_) return;
+    const u16 cols = cell_cols(x1, x2);
+    const s32 r1 = std::clamp(y1, 0, 511) / 16, r2 = std::clamp(y2, 0, 511) / 16;
+    for (s32 r = r1; r <= r2; ++r) {
+        if ((tex_cells_[static_cast<std::size_t>(r)] & cols) != 0) {
+            flush_hr();
+            return;
+        }
+    }
+}
+
+void PsxGpu::hr_queue(const HrPrim& prim, s32 bx1, s32 by1, s32 bx2, s32 by2) {
+    HrPrim p = prim;
+    p.texwin = texwin_;
+    p.cx1 = clip_x1_; p.cy1 = clip_y1_; p.cx2 = clip_x2_; p.cy2 = clip_y2_;
+    // Native draw area of this primitive (it is drawn natively right after being queued)
+    bx1 = std::max(bx1, p.cx1); by1 = std::max(by1, p.cy1);
+    bx2 = std::min(bx2, p.cx2); by2 = std::min(by2, p.cy2);
+    if (bx1 <= bx2 && by1 <= by2) hr_guard_write(bx1, by1, bx2, by2);
+    // (Render to texture needs no flush: the native VRAM already holds what earlier primitives drew.)
+
+    if (hr_batch_.empty()) {
+        batch_x1_ = p.cx1; batch_y1_ = p.cy1; batch_x2_ = p.cx2; batch_y2_ = p.cy2;
+        batch_has_tex_ = false;
+        tex_cells_.fill(0);
+        rim_pending_.clear();
+    } else {
+        batch_x1_ = std::min(batch_x1_, p.cx1); batch_y1_ = std::min(batch_y1_, p.cy1);
+        batch_x2_ = std::max(batch_x2_, p.cx2); batch_y2_ = std::max(batch_y2_, p.cy2);
+    }
+    // Thin rim light: the bright copy is queued first; when the normal polygon with the same
+    // texture coordinates follows, move the copy so that its shift (normally ~1 native pixel,
+    // i.e. N upscaled pixels) becomes the same number of upscaled pixels.
+    if (!p.is_rect && p.textured) {
+        const u64 key = (static_cast<u64>(p.texpage) << 48) ^ (static_cast<u64>(p.clut) << 32) ^
+                        (static_cast<u64>(p.v[0].u) | (static_cast<u64>(p.v[0].v) << 8) |
+                         (static_cast<u64>(p.v[1].u) << 16) | (static_cast<u64>(p.v[1].v) << 24)) ^
+                        (static_cast<u64>(p.v[2].u) << 40) ^ (static_cast<u64>(p.v[2].v) << 56);
+        if (p.rim) {
+            // Until its normal polygon arrives (it may come after a queue flush), use the shift of
+            // the most recent matched pair: the light direction is the same for the whole model
+            const s32 s = static_cast<s32>(hr_scale_);
+            for (int i = 0; i < 3; ++i) {
+                p.ox[i] = -static_cast<s32>(std::lround(rim_dx_ * static_cast<float>(s - 1)));
+                p.oy[i] = -static_cast<s32>(std::lround(rim_dy_ * static_cast<float>(s - 1)));
+            }
+            rim_pending_[key] = hr_batch_.size();
+        } else if (!rim_pending_.empty()) {
+            const auto it = rim_pending_.find(key);
+            if (it != rim_pending_.end()) {
+                HrPrim& r = hr_batch_[it->second];
+                // The shift is not exactly the same at every vertex (rounding), so it is applied per vertex
+                bool same = r.texpage == p.texpage && r.clut == p.clut;
+                for (int i = 0; i < 3 && same; ++i) {
+                    same = r.v[i].u == p.v[i].u && r.v[i].v == p.v[i].v &&
+                           std::abs(r.v[i].x - p.v[i].x) <= 4 && std::abs(r.v[i].y - p.v[i].y) <= 4;
+                }
+                if (same) {
+                    const s32 s = static_cast<s32>(hr_scale_);
+                    float sx = 0.0f, sy = 0.0f;
+                    for (int i = 0; i < 3; ++i) {
+                        r.ox[i] = -(r.v[i].x - p.v[i].x) * (s - 1);
+                        r.oy[i] = -(r.v[i].y - p.v[i].y) * (s - 1);
+                        // Exact model position: the copy follows it (plus the game's shift)
+                        if (p.v[i].exact) {
+                            r.v[i].exact = true;
+                            r.v[i].fx = p.v[i].fx + static_cast<float>(r.v[i].x - p.v[i].x);
+                            r.v[i].fy = p.v[i].fy + static_cast<float>(r.v[i].y - p.v[i].y);
+                            r.v[i].fz = p.v[i].fz;
+                        }
+                        sx += static_cast<float>(r.v[i].x - p.v[i].x);
+                        sy += static_cast<float>(r.v[i].y - p.v[i].y);
+                    }
+                    rim_dx_ = sx / 3.0f;
+                    rim_dy_ = sy / 3.0f;
+                }
+                rim_pending_.erase(it);
+            }
+        }
+    }
+    p.mset   = mask_set_;
+    p.mcheck = mask_check_;
+    if (p.textured) {
+        const TexRects t = tex_rects(p.texpage, p.clut);
+        const bool own_tex = bx1 <= bx2 && by1 <= by2 &&
+            (rects_overlap(bx1, by1, bx2, by2, t.tx1, t.ty1, t.tx2, t.ty2) ||
+             (t.has_clut && rects_overlap(bx1, by1, bx2, by2, t.cx1, t.cy1, t.cx2, t.cy2)));
+        // A 15bpp sprite reading its own draw area (Vagrant Story's cutscene trail effect) sees
+        // its own fresh pixels as it goes; the upscaled copy reproduces that from the upscaled picture.
+        p.self_tex = own_tex && p.is_rect && ((p.texpage >> 7) & 3u) == 2u && p.texwin == 0;
+        if (p.self_tex && !hr_batch_.empty()) {
+            // It must be drawn row by row on one thread: draw everything queued before it in
+            // parallel first, so that only this sprite is drawn serially
+            flush_hr();
+            batch_x1_ = p.cx1; batch_y1_ = p.cy1; batch_x2_ = p.cx2; batch_y2_ = p.cy2;
+            batch_has_tex_ = false;
+            tex_cells_.fill(0);
+            rim_pending_.clear();
+        }
+        hr_batch_.push_back(p);
+        hr_mark_tex_cells(t.tx1, t.ty1, t.tx2, t.ty2);
+        if (t.has_clut) hr_mark_tex_cells(t.cx1, t.cy1, t.cx2, t.cy2);
+        // A primitive that draws over its own texture must be drawn before its native draw
+        if (own_tex) {
+            flush_hr();
+            return;
+        }
+    } else {
+        hr_batch_.push_back(p);
+    }
+    if (hr_batch_.size() >= 16384u) flush_hr();
+}
+
+void PsxGpu::flush_hr() {
+    if (hr_batch_.empty()) return;
+    if (hr_scale_ > 1u && hr_) {
+        hr_->set_options({tex_filter_, persp_tex_, rim_mode_ == RimLight::Soft});
+        hr_->draw(hr_batch_, batch_y1_, batch_y2_, vram_.data());
+    }
+    hr_batch_.clear();
+}
+
+void PsxGpu::set_internal_scale(u32 scale) {
+    scale = std::clamp<u32>(scale, 1u, MAX_INTERNAL_SCALE);
+    if (scale == hr_scale_ && (scale == 1u || hr_)) return;
+    flush_hr();
+    hr_scale_ = scale;
+    if (scale == 1u) {
+        if (hr_) hr_->set_scale(1u, vram_.data());
+        return;
+    }
+    if (!hr_) hr_ = make_software_hr_backend();
+    hr_->set_scale(scale, vram_.data()); // Starts from the current native picture
+}
+
+void PsxGpu::set_hr_backend(std::unique_ptr<HrBackend> backend) {
+    flush_hr();
+    hr_ = std::move(backend);
+    if (hr_ && hr_scale_ > 1u) hr_->set_scale(hr_scale_, vram_.data());
+}
+
+const std::vector<u32>& PsxGpu::hr_vram() const {
+    static const std::vector<u32> none;
+    return (hr_ && hr_scale_ > 1u) ? hr_->picture() : none;
+}
+
+void PsxGpu::hr_sync_rect(u32 x, u32 y, u32 w, u32 h) {
+    if (hr_scale_ == 1u || !hr_) return;
+    flush_hr(); // Keep drawing order with queued primitives
+    hr_->sync(x, y, w, h, vram_.data());
+}
+
+void PsxGpu::hr_copy_rect(u32 sx, u32 sy, u32 dx, u32 dy, u32 w, u32 h) {
+    if (hr_scale_ == 1u || !hr_) return;
+    flush_hr();
+    hr_->copy(sx, sy, dx, dy, w, h);
+}
+
 void PsxGpu::rasterize_triangle(const Vertex& v0, const Vertex& v1_in, const Vertex& v2_in,
                                 bool shaded, bool textured, u16 clut_word, u16 texpage_word, bool semi_trans) {
+    if (hr_scale_ > 1u) {
+        HrPrim p;
+        p.shaded   = shaded;
+        p.textured = textured;
+        p.semi     = semi_trans;
+        p.v[0] = v0;
+        p.v[1] = v1_in;
+        p.v[2] = v2_in;
+        p.clut    = clut_word;
+        p.texpage = texpage_word;
+        p.rim     = hr_rim_;
+        hr_queue(p, std::min({v0.x, v1_in.x, v2_in.x}), std::min({v0.y, v1_in.y, v2_in.y}),
+                 std::max({v0.x, v1_in.x, v2_in.x}), std::max({v0.y, v1_in.y, v2_in.y}));
+    }
     Vertex v1 = v1_in;
     Vertex v2 = v2_in;
     s32 min_x = std::min({v0.x, v1.x, v2.x});
@@ -335,17 +560,21 @@ void PsxGpu::rasterize_triangle(const Vertex& v0, const Vertex& v1_in, const Ver
                     const u16 out_px = (semi_trans && (texel & 0x8000u) != 0)
                         ? blend_psx_abr(read_vram_pixel(static_cast<u32>(px), static_cast<u32>(py)), mr, mg, mb, (texpage_word >> 5) & 3u)
                         : rgb888_to_555(mr, mg, mb);
-                    write_vram_pixel(static_cast<u32>(px), static_cast<u32>(py), out_px);
+                    // Bit 15 of the texel is written along (it is the pixel's mask bit)
+                    plot_vram_pixel(static_cast<u32>(px), static_cast<u32>(py), static_cast<u16>(out_px | (texel & 0x8000u)));
                 } else {
                     const u16 out_px = semi_trans
                         ? blend_psx_abr(read_vram_pixel(static_cast<u32>(px), static_cast<u32>(py)), r, g, b, (texpage_word >> 5) & 3u)
                         : rgb888_to_555(r, g, b);
-                    write_vram_pixel(static_cast<u32>(px), static_cast<u32>(py), out_px);
+                    plot_vram_pixel(static_cast<u32>(px), static_cast<u32>(py), out_px);
                 }
             }
         }
     }
 }
+
+
+
 
 void PsxGpu::dispatch_gp0_packet() {
     const u32 w0 = fifo_[0];
@@ -380,6 +609,15 @@ void PsxGpu::dispatch_gp0_packet() {
             const u32 xy = fifo_[idx++];
             verts[i].x = sign_extend_11(xy & 0xFFFFu) + draw_off_x_;
             verts[i].y = sign_extend_11(xy >> 16) + draw_off_y_;
+            if (pgxp_ && hr_scale_ > 1u) {
+                PgxpCache::Point pt;
+                if (pgxp_->lookup(xy, pt)) {
+                    verts[i].exact = true;
+                    verts[i].fx    = pt.x + static_cast<float>(draw_off_x_);
+                    verts[i].fy    = pt.y + static_cast<float>(draw_off_y_);
+                    verts[i].fz    = pt.z;
+                }
+            }
 
             if (textured) {
                 const u32 uv = fifo_[idx++];
@@ -393,10 +631,22 @@ void PsxGpu::dispatch_gp0_packet() {
             }
         }
 
+        // Vagrant Story's rim light (cutscenes, menus): the model is drawn once with an over-bright
+        // white colour (FFFFFF), shifted about one pixel toward the light, then normally on top.
+        bool rim = textured && !semi && !raw_tex;
+        for (int i = 0; i < num_verts && rim; ++i) {
+            rim = verts[i].r == 0xFFu && verts[i].g == 0xFFu && verts[i].b == 0xFFu;
+        }
+        if (rim && rim_mode_ == RimLight::Off) {
+            ++primitives_drawn_;
+            return;
+        }
+        hr_rim_ = rim; // Soft or sharp: the upscaled copy is reshaped when drawn
         rasterize_triangle(verts[0], verts[1], verts[2], shaded, textured, clut_word, texpage_word, semi);
         if (quad) {
             rasterize_triangle(verts[1], verts[2], verts[3], shaded, textured, clut_word, texpage_word, semi);
         }
+        hr_rim_ = false;
         ++primitives_drawn_;
         return;
     }
@@ -447,6 +697,18 @@ void PsxGpu::dispatch_gp0_packet() {
             case 3: rw = 16; rh = 16; break;
         }
 
+        if (hr_scale_ > 1u) {
+            HrPrim p;
+            p.is_rect  = true;
+            p.textured = textured;
+            p.semi     = semi;
+            p.rx = rx; p.ry = ry; p.rw = rw; p.rh = rh;
+            p.cr = cr; p.cg = cg; p.cb = cb;
+            p.bu = base_u; p.bv = base_v;
+            p.clut    = clut_word;
+            p.texpage = texpage_;
+            hr_queue(p, rx, ry, rx + rw - 1, ry + rh - 1);
+        }
         for (s32 dy = 0; dy < rh; ++dy) {
             const s32 py = ry + dy;
             if (py < clip_y1_ || py > clip_y2_) continue;
@@ -468,12 +730,12 @@ void PsxGpu::dispatch_gp0_packet() {
                     const u16 out_px = (semi && (texel & 0x8000u) != 0)
                         ? blend_psx_abr(read_vram_pixel(static_cast<u32>(px), static_cast<u32>(py)), mr, mg, mb, (texpage_ >> 5) & 3u)
                         : rgb888_to_555(mr, mg, mb);
-                    write_vram_pixel(static_cast<u32>(px), static_cast<u32>(py), out_px);
+                    plot_vram_pixel(static_cast<u32>(px), static_cast<u32>(py), static_cast<u16>(out_px | (texel & 0x8000u)));
                 } else {
                     const u16 out_px = semi
                         ? blend_psx_abr(read_vram_pixel(static_cast<u32>(px), static_cast<u32>(py)), cr, cg, cb, (texpage_ >> 5) & 3u)
                         : rgb888_to_555(cr, cg, cb);
-                    write_vram_pixel(static_cast<u32>(px), static_cast<u32>(py), out_px);
+                    plot_vram_pixel(static_cast<u32>(px), static_cast<u32>(py), out_px);
                 }
             }
         }
@@ -490,11 +752,13 @@ void PsxGpu::dispatch_gp0_packet() {
             const u32 fy = (fifo_[1] >> 16) & 0x1FFu;
             const u32 fw = ((fifo_[2] & 0x3FFu) + 0x0Fu) & ~0x0Fu;
             const u32 fh = (fifo_[2] >> 16) & 0x1FFu;
+            flush_hr(); // Queued primitives may still read textures from this area
             for (u32 dy = 0; dy < fh; ++dy) {
                 for (u32 dx = 0; dx < fw; ++dx) {
                     write_vram_pixel(fx + dx, fy + dy, fill_col);
                 }
             }
+            hr_sync_rect(fx, fy, fw, fh);
             ++primitives_drawn_;
             break;
         }
@@ -504,6 +768,7 @@ void PsxGpu::dispatch_gp0_packet() {
             u32 cw = fifo_[3] & 0x3FFu, ch = (fifo_[3] >> 16) & 0x1FFu;
             if (cw == 0) cw = 0x400u;
             if (ch == 0) ch = 0x200u;
+            flush_hr(); // Queued primitives may still read textures from the destination
             std::vector<u16> tmp(cw * ch);
             for (u32 y = 0; y < ch; ++y) {
                 for (u32 x = 0; x < cw; ++x) {
@@ -512,9 +777,10 @@ void PsxGpu::dispatch_gp0_packet() {
             }
             for (u32 y = 0; y < ch; ++y) {
                 for (u32 x = 0; x < cw; ++x) {
-                    write_vram_pixel(dx + x, dy + y, tmp[y * cw + x]);
+                    plot_vram_pixel(dx + x, dy + y, tmp[y * cw + x]);
                 }
             }
+            hr_copy_rect(sx, sy, dx, dy, cw, ch); // Keep the copied picture at full detail
             break;
         }
         case 0xA0: { // CPU -> VRAM Transfer
@@ -526,6 +792,7 @@ void PsxGpu::dispatch_gp0_packet() {
             if (xfer_h_ == 0) xfer_h_ = 0x200u;
             xfer_cx_ = 0;
             xfer_cy_ = 0;
+            flush_hr(); // Draw queued primitives before the upload replaces textures they use
             mode_    = Gp0Mode::CpuToVramCopy;
             break;
         }
@@ -563,6 +830,12 @@ void PsxGpu::dispatch_gp0_packet() {
         }
         case 0xE2: { // Texture Window (mask/offset in 8-texel steps)
             texwin_ = w0 & 0x000FFFFFu;
+            break;
+        }
+        case 0xE6: { // Mask bit setting
+            mask_set_   = (w0 & 1u) != 0;
+            mask_check_ = (w0 & 2u) != 0;
+            gpustat_ = (gpustat_ & ~(3u << 11)) | ((w0 & 3u) << 11);
             break;
         }
         default:
@@ -616,6 +889,34 @@ bool PsxGpu::dump_ppm(const std::filesystem::path& path, bool full_vram) const {
     const u32 sy = full_vram ? 0u : disp_vram_y_;
     const u32 w  = full_vram ? VRAM_WIDTH : disp_width_;
     const u32 h  = full_vram ? VRAM_HEIGHT : disp_height_;
+
+    if (!full_vram && !display_enabled()) {
+        // Video output switched off by the game: black picture
+        const u32 s = (!is_24bit_display() && hr_scale_ > 1u) ? hr_scale_ : 1u;
+        out << "P6\n" << (w * s) << " " << (h * s) << "\n255\n";
+        const std::vector<char> black(static_cast<std::size_t>(w * s) * 3u, 0);
+        for (u32 y = 0; y < h * s; ++y) out.write(black.data(), static_cast<std::streamsize>(black.size()));
+        return out.good();
+    }
+
+    if (!full_vram && !is_24bit_display() && hr_scale_ > 1u) {
+        // Upscaled display picture at internal resolution
+        const u32 s = hr_scale_, hw = VRAM_WIDTH * s, hh = VRAM_HEIGHT * s;
+        const std::vector<u32>& pic = hr_vram();
+        if (pic.size() != static_cast<std::size_t>(hw) * hh) return false;
+        out << "P6\n" << (w * s) << " " << (h * s) << "\n255\n";
+        std::vector<u8> hrow(w * s * 3u);
+        for (u32 y = 0; y < h * s; ++y) {
+            for (u32 x = 0; x < w * s; ++x) {
+                const u32 px = pic[static_cast<std::size_t>((sy * s + y) % hh) * hw + (sx * s + x) % hw];
+                hrow[x * 3u + 0] = static_cast<u8>(px & 0xFFu);
+                hrow[x * 3u + 1] = static_cast<u8>((px >> 8) & 0xFFu);
+                hrow[x * 3u + 2] = static_cast<u8>((px >> 16) & 0xFFu);
+            }
+            out.write(reinterpret_cast<const char*>(hrow.data()), static_cast<std::streamsize>(hrow.size()));
+        }
+        return out.good();
+    }
 
     out << "P6\n" << w << " " << h << "\n255\n";
     std::vector<u8> row(w * 3u);

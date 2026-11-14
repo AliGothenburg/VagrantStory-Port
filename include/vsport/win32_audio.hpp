@@ -23,6 +23,9 @@ public:
     [[nodiscard]] bool is_muted() const noexcept { return muted_; }
     void set_muted(bool m) noexcept { muted_ = m; }
     void toggle_mute() noexcept { muted_ = !muted_; }
+    // Output volume in percent (0..100)
+    void set_volume(u32 percent) noexcept { volume_percent_ = percent > 100u ? 100u : percent; }
+    [[nodiscard]] u32 volume() const noexcept { return volume_percent_; }
 
     // Pulls synthesized stereo frames from PsxSpu and queues them to Windows audio hardware
     void pump_from_spu(PsxSpu& spu);
@@ -32,6 +35,7 @@ private:
     Impl* impl_ = nullptr;
     bool open_  = false;
     bool muted_ = false;
+    u32 volume_percent_ = 100;
 };
 
 } // namespace vsport

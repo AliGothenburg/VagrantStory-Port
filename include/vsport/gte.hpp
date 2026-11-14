@@ -1,5 +1,6 @@
 #pragma once
 
+#include "vsport/pgxp.hpp"
 #include "vsport/types.hpp"
 
 #include <array>
@@ -17,6 +18,8 @@ public:
 
     // Host enhancement: Widescreen X-axis scale (1.0f = native 4:3, 0.75f = 16:9 hor+ field expansion)
     void set_widescreen_scale(float x_scale) noexcept { widescreen_x_scale_ = x_scale; }
+    // Exact projected positions are recorded here (upscaled picture precision); null = off
+    void set_pgxp(PgxpCache* cache) noexcept { pgxp_ = cache; }
     [[nodiscard]] float widescreen_scale() const noexcept { return widescreen_x_scale_; }
 
     // MFC2 / MTC2 (Data registers 0..31)
@@ -54,6 +57,7 @@ private:
     std::array<u32, 32> data_{};
     std::array<u32, 32> ctrl_{};
     float widescreen_x_scale_ = 1.0f;
+    PgxpCache* pgxp_ = nullptr;
 };
 
 } // namespace vsport

@@ -5,11 +5,15 @@
 #include "vsport/runtime.hpp"
 #include "vsport/win32_audio.hpp"
 #include "vsport/win32_input.hpp"
+#include "launcher_win32.hpp"
+#include "vsport/d3d11_hr_backend.hpp"
 
 #ifdef VSPORT_HAS_AOT_MODULES
 #include "vs_aot_registry.hpp"
 #endif
 
+#include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
@@ -147,16 +151,70 @@ struct Win32HostState {
     Win32AudioOut* audio    = nullptr;
     bool self_demo          = false;
     bool show_full_vram     = false;
-    bool widescreen         = false;
+    bool widescreen         = false; // Widen the 3D view to the picture aspect (GTE hack)
+    int aspect              = 0;     // Index into launcher::ASPECT_VALUES
     float demo_angle        = 0.0f;
+
+    // Picture width / height: the chosen preset, or the window itself in "fill" mode
+    float picture_aspect(HWND hwnd) const {
+        const float a = launcher::ASPECT_VALUES[std::clamp(aspect, 0, launcher::ASPECT_COUNT - 1)];
+        if (a > 0.0f) return a;
+        RECT cr{};
+        GetClientRect(hwnd, &cr);
+        return cr.bottom > 0 ? static_cast<float>(cr.right) / static_cast<float>(cr.bottom) : 4.0f / 3.0f;
+    }
+    // Windowed mode: make the client area exactly the picture's shape (keeps its height), so no
+    // black bars appear around the picture
+    void fit_window_to_aspect(HWND hwnd) const {
+        const float a = launcher::ASPECT_VALUES[std::clamp(aspect, 0, launcher::ASPECT_COUNT - 1)];
+        if (fullscreen || a <= 0.0f || IsZoomed(hwnd) || IsIconic(hwnd)) return;
+        RECT cr{};
+        GetClientRect(hwnd, &cr);
+        RECT wr{0, 0, static_cast<LONG>(static_cast<float>(cr.bottom) * a + 0.5f), cr.bottom};
+        AdjustWindowRect(&wr, static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_STYLE)), FALSE);
+        SetWindowPos(hwnd, nullptr, 0, 0, wr.right - wr.left, wr.bottom - wr.top,
+                     SWP_NOMOVE | SWP_NOZORDER | SWP_NOOWNERZORDER);
+    }
+    // Hor+ widening: shrink GTE X so a wider picture shows more of the scene instead of stretching it
+    void apply_gte_widening(HWND hwnd) const {
+        const float k = widescreen ? std::clamp((4.0f / 3.0f) / picture_aspect(hwnd), 0.25f, 1.0f) : 1.0f;
+        if (rt && rt->gte().widescreen_scale() != k) rt->gte().set_widescreen_scale(k);
+    }
+    bool fullscreen         = false;
+    WINDOWPLACEMENT windowed_placement{sizeof(WINDOWPLACEMENT)};
+
+    // Borderless fullscreen on the window's current monitor (F11 / Alt+Enter)
+    void toggle_fullscreen(HWND hwnd) {
+        if (!fullscreen) {
+            MONITORINFO mi{sizeof(MONITORINFO)};
+            if (!GetWindowPlacement(hwnd, &windowed_placement) ||
+                !GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTOPRIMARY), &mi)) {
+                return;
+            }
+            SetWindowLongPtrW(hwnd, GWL_STYLE, WS_POPUP | WS_VISIBLE);
+            SetWindowPos(hwnd, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top,
+                         mi.rcMonitor.right - mi.rcMonitor.left, mi.rcMonitor.bottom - mi.rcMonitor.top,
+                         SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+            ShowCursor(FALSE);
+            fullscreen = true;
+        } else {
+            SetWindowLongPtrW(hwnd, GWL_STYLE, WS_OVERLAPPEDWINDOW | WS_VISIBLE);
+            SetWindowPlacement(hwnd, &windowed_placement);
+            SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+            ShowCursor(TRUE);
+            fullscreen = false;
+        }
+    }
 
     void update_window_title(HWND hwnd) const {
         char title[256]{};
         const char* backend = (d3d && d3d->is_initialized()) ? d3d->shader_mode_name() : "GDI Yazilim";
         const char* sound   = (audio && audio->is_open()) ? (audio->is_muted() ? "Sessiz" : "44.1kHz ADPCM") : "Kapali";
         std::snprintf(title, sizeof(title),
-                      "Vagrant Story Native Port [%s | Ses: %s] — F2: VRAM | F3: 16:9 | F4: Shader | M: Ses | F12: Kaydet",
-                      backend, sound);
+                      "Vagrant Story Native Port [%s | %s%s | Ses: %s] - F11: Tam ekran | F3: Oran | Shift+F3: 3D genislet | F4: Shader | M: Ses | Tab: Hizli",
+                      backend, launcher::ASPECT_NAMES[std::clamp(aspect, 0, launcher::ASPECT_COUNT - 1)],
+                      widescreen ? " genis 3D" : "", sound);
         SetWindowTextA(hwnd, title);
     }
 };
@@ -169,16 +227,58 @@ LRESULT CALLBACK HostWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) 
                 st->d3d->resize(LOWORD(lparam), HIWORD(lparam));
             }
             break;
-        case WM_KEYDOWN:
-            if (wparam == VK_ESCAPE) {
-                PostQuitMessage(0);
+        case WM_SIZING: {
+            // Dragging a window edge keeps the chosen aspect ratio (not in "fill" mode)
+            const float a = st ? launcher::ASPECT_VALUES[std::clamp(st->aspect, 0, launcher::ASPECT_COUNT - 1)] : 0.0f;
+            if (a <= 0.0f) break;
+            auto* r = reinterpret_cast<RECT*>(lparam);
+            RECT frame{0, 0, 0, 0};
+            AdjustWindowRect(&frame, static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_STYLE)), FALSE);
+            const int fw = frame.right - frame.left, fh = frame.bottom - frame.top;
+            const int cw = (r->right - r->left) - fw, ch = (r->bottom - r->top) - fh;
+            if (wparam == WMSZ_LEFT || wparam == WMSZ_RIGHT) {
+                r->bottom = r->top + static_cast<LONG>(static_cast<float>(cw) / a + 0.5f) + fh; // Width drives
+            } else {
+                const LONG w = static_cast<LONG>(static_cast<float>(ch) * a + 0.5f) + fw;         // Height drives
+                if (wparam == WMSZ_TOPLEFT || wparam == WMSZ_BOTTOMLEFT) r->left = r->right - w;
+                else r->right = r->left + w;
+            }
+            return TRUE;
+        }
+        case WM_SYSKEYDOWN:
+            // Alt+Enter: toggle fullscreen (bit 29 = Alt held)
+            if (st && wparam == VK_RETURN && (lparam & (1 << 29)) != 0) {
+                st->toggle_fullscreen(hwnd);
                 return 0;
             }
-            if (st && wparam == VK_F2) {
+            break;
+        case WM_KEYDOWN:
+            if (wparam == VK_ESCAPE) {
+                if (st && st->fullscreen) {
+                    st->toggle_fullscreen(hwnd); // Leave fullscreen first so the dialog is visible
+                }
+                const int answer = MessageBoxW(hwnd,
+                    L"Oyundan Ã§Ä±kmak istiyor musunuz?\n\n"
+                    L"Oyunda kaydetmediÄŸiniz ilerleme kaybolur.",
+                    L"Vagrant Story", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2);
+                if (answer == IDYES) {
+                    PostQuitMessage(0);
+                }
+                return 0;
+            }
+            if (st && wparam == VK_F11) {
+                st->toggle_fullscreen(hwnd);
+            } else if (st && wparam == VK_F2) {
                 st->show_full_vram = !st->show_full_vram;
             } else if (st && wparam == VK_F3) {
-                st->widescreen = !st->widescreen;
-                st->rt->gte().set_widescreen_scale(st->widescreen ? 0.75f : 1.0f);
+                if ((GetKeyState(VK_SHIFT) & 0x8000) != 0) {
+                    st->widescreen = !st->widescreen;            // Shift+F3: widen 3D on/off
+                } else {
+                    st->aspect = (st->aspect + 1) % launcher::ASPECT_COUNT; // F3: next aspect ratio
+                }
+                st->fit_window_to_aspect(hwnd);
+                st->apply_gte_widening(hwnd);
+                st->update_window_title(hwnd);
             } else if (st && wparam == VK_F4) {
                 if (st->d3d && st->d3d->is_initialized()) {
                     st->d3d->cycle_shader_mode();
@@ -208,8 +308,22 @@ namespace vsport { void dump_halt_trace(); }
 using vsport::dump_halt_trace;
 
 int main(int argc, char** argv) {
+#if defined(_WIN32) && defined(VSPORT_GUI_SUBSYSTEM)
+    // VagrantStory.exe is a GUI-subsystem build (no console window on double-click). When it is
+    // started from a terminal, write the log there instead.
+    if (AttachConsole(ATTACH_PARENT_PROCESS)) {
+        FILE* f = nullptr;
+        freopen_s(&f, "CONOUT$", "w", stdout);
+        freopen_s(&f, "CONOUT$", "w", stderr);
+    }
+#endif
+#ifdef _WIN32
+    // Crisp settings window and exact pixel sizes on high-DPI displays (no bitmap stretching)
+    SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+#endif
     std::filesystem::path disc_path;
     std::filesystem::path sbi_path;
+    std::filesystem::path memcard_path;
     std::filesystem::path dump_ppm_path;
     std::filesystem::path dump_disp_path;
     std::filesystem::path dump_wav_path;
@@ -220,7 +334,21 @@ int main(int argc, char** argv) {
     bool auto_start = false;
     bool sw_present = false;
     bool test_d3d11 = false;
+    float widen_aspect = 0.0f; // --widen A (0 = off)
+    int rim_mode = -1;         // --rim N (-1 = from settings / default)
+    bool perf = false;         // --perf
+    int gpu_hr = -1;           // --gpu-hr (1) / --cpu-hr (0); -1 = from settings (window) or CPU (headless)
+    bool hidden_window = false; // --hidden
+    bool no_throttle = false;   // --no-throttle
+    std::string window_dump_path; // --window-dump FILE N
+    u32 window_dump_frame = 0;
+    int pgxp_mode = -1;       // --pgxp N (-1 = from settings / default 2)
+    std::filesystem::path series_dir; // --dump-series DIR N
+    u32 series_every = 0;
+    u32 series_from  = 0;
     u64 max_cycles  = 2'000'000ull;
+    u32 internal_scale = 0; // --scale N (0 = from settings / native)
+    bool texture_filter = false; // --texfilter
     // Scripted headless input: --press BUTTON@VBLANK[:FRAMES][,...] (e.g. START@560,CROSS@900:4)
     struct ScriptedPress { u16 bits; u32 at_vblank; u32 frames; };
     std::vector<ScriptedPress> presses;
@@ -259,6 +387,35 @@ int main(int argc, char** argv) {
             disc_path = argv[++i];
         } else if (arg == "--sbi" && i + 1 < argc) {
             sbi_path = argv[++i];
+        } else if (arg == "--memcard" && i + 1 < argc) {
+            memcard_path = argv[++i];
+        } else if (arg == "--scale" && i + 1 < argc) {
+            internal_scale = static_cast<u32>(std::strtoul(argv[++i], nullptr, 10));
+        } else if (arg == "--texfilter") {
+            texture_filter = true;
+        } else if (arg == "--hidden") {
+            hidden_window = true; // Tests: invisible window, no real input
+        } else if (arg == "--no-throttle") {
+            no_throttle = true;   // Tests: run as fast as possible instead of real time
+        } else if (arg == "--window-dump" && i + 2 < argc) {
+            window_dump_path  = argv[++i]; // Tests: save the window picture at frame N, then quit
+            window_dump_frame = static_cast<u32>(std::strtoul(argv[++i], nullptr, 10));
+        } else if (arg == "--gpu-hr") {
+            gpu_hr = 1; // Draw the upscaled picture on the graphics card (Direct3D 11)
+        } else if (arg == "--cpu-hr") {
+            gpu_hr = 0; // Draw the upscaled picture on the processor (software)
+        } else if (arg == "--perf") {
+            perf = true; // Headless: print speed every 250 frames
+        } else if (arg == "--pgxp" && i + 1 < argc) {
+            // Vertex precision in the upscaled picture: 0 = off, 1 = no wobble, 2 = + perspective textures
+            pgxp_mode = std::clamp(std::atoi(argv[++i]), 0, 2);
+        } else if (arg == "--rim" && i + 1 < argc) {
+            // Character rim light: 0 = soft, 1 = sharp, 2 = off
+            rim_mode = std::clamp(std::atoi(argv[++i]), 0, 2);
+        } else if (arg == "--widen" && i + 1 < argc) {
+            // Headless diagnostics: widen the 3D view to this aspect ratio (e.g. 1.7778 for 16:9)
+            const float a = std::strtof(argv[++i], nullptr);
+            if (a > 0.0f) widen_aspect = a;
         } else if (arg == "--headless") {
             headless = true;
         } else if (arg == "--self-demo") {
@@ -277,6 +434,14 @@ int main(int argc, char** argv) {
             dump_ppm_path = argv[++i];
         } else if (arg == "--dump-display" && i + 1 < argc) {
             dump_disp_path = argv[++i];
+        } else if (arg == "--dump-series" && i + 2 < argc) {
+            series_dir   = argv[++i];
+            series_every = static_cast<u32>(std::max(1, std::atoi(argv[++i])));
+            if (i + 1 < argc && argv[i + 1][0] >= '0' && argv[i + 1][0] <= '9') {
+                series_from = static_cast<u32>(std::atoi(argv[++i])); // Optional first frame
+            }
+            std::error_code ec;
+            std::filesystem::create_directories(series_dir, ec);
         } else if (arg == "--dump-wav" && i + 1 < argc) {
             dump_wav_path = argv[++i];
         } else if (arg == "--dump-ram" && i + 1 < argc) {
@@ -308,7 +473,7 @@ int main(int argc, char** argv) {
             return 1;
         }
         for (int m = 0; m < 3; ++m) {
-            td3d.present_vram(trt.gpu(), false, m == 1, false);
+            td3d.present_vram(trt.gpu(), false, m == 1 ? 16.0f / 9.0f : (m == 2 ? 0.0f : 4.0f / 3.0f), false);
             td3d.cycle_shader_mode();
         }
         std::printf("[PASS] D3D11 + HLSL Shader Model 4.0 dogrulandi! GPU: %s\n", td3d.adapter_name().c_str());
@@ -318,16 +483,82 @@ int main(int argc, char** argv) {
     }
 #endif
 
-    if (disc_path.empty() && !self_demo) {
-        std::cout << "Kullanim:\n"
-                  << "  vs_host --disc <VagrantStory.cue|.bin|.iso> [--sbi altkanal.sbi] [--headless] [--no-aot] [--cycles N] [--dump-vram vram.ppm]\n"
-                  << "  vs_host --self-demo [--headless] [--dump-vram demo.ppm]\n";
+    // Errors go to the log and, in windowed mode, to a message box (no console on double-click)
+    const auto fail = [&](const std::string& msg) {
+        std::cerr << "[HATA] " << msg << "\n";
+#ifdef _WIN32
+        if (!headless) {
+            launcher::show_message(msg + "\n\nAyarlar penceresini acmak icin oyunu Shift tusuna basili tutarak baslatin.", true);
+        }
+#endif
         return 1;
+    };
+
+    // Settings from VagrantStory.ini, used when the game is started without --disc (double-click)
+    launcher::GameSettings settings;
+    bool use_settings = false;
+
+    if (disc_path.empty() && !self_demo) {
+#ifdef _WIN32
+        if (!headless) {
+            settings = launcher::load_settings(launcher::settings_path());
+            std::error_code ec;
+            const bool disc_ok = !settings.disc.empty() && std::filesystem::exists(settings.disc, ec);
+            const bool shift   = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+            if (settings.show_launcher || shift || !disc_ok) {
+                if (!launcher::run_settings_window(settings)) {
+                    return 0; // Player closed the settings window
+                }
+            }
+            disc_path    = settings.disc;
+            sbi_path     = settings.sbi;
+            use_settings = true;
+        }
+#endif
+        if (disc_path.empty()) {
+            std::cout << "Kullanim:\n"
+                      << "  vs_host --disc <VagrantStory.cue|.bin|.iso> [--sbi altkanal.sbi] [--headless] [--no-aot] [--cycles N] [--dump-vram vram.ppm]\n"
+                      << "  vs_host --self-demo [--headless] [--dump-vram demo.ppm]\n"
+                      << "  vs_host            (ayarlar penceresi; secimler VagrantStory.ini'ye kaydedilir)\n";
+            return 1;
+        }
     }
 
     PsxRuntime rt(PSX_RAM_SIZE_2MB);
     CpuContext ctx{};
     DiscImage disc;
+    if (widen_aspect > 0.0f) rt.gte().set_widescreen_scale(std::min(1.0f, (4.0f / 3.0f) / widen_aspect));
+    if (internal_scale == 0) {
+        internal_scale = use_settings ? static_cast<u32>(settings.internal_scale) : 1u;
+    }
+    rt.gpu().set_internal_scale(internal_scale);
+    // Upscaled picture on the graphics card; on any failure the processor (software) keeps drawing
+    const auto use_gpu_hr = [&rt](void* device) {
+        std::string err;
+        auto b = make_d3d11_hr_backend(device, &err);
+        if (b) {
+            rt.gpu().set_hr_backend(std::move(b));
+            if (rt.gpu().hr_backend() && rt.gpu().hr_backend()->gpu_picture_view()) {
+                std::printf("[vs_host] Yuksek cozunurluk ekran kartinda ciziliyor (Direct3D 11)\n");
+                return;
+            }
+            err = "hedef doku olusturulamadi";
+            rt.gpu().set_hr_backend(make_software_hr_backend());
+        }
+        std::printf("[vs_host] Ekran karti cizimi baslatilamadi (%s), islemci kullaniliyor\n", err.c_str());
+    };
+    if (gpu_hr == 1 && headless && internal_scale > 1u) {
+        use_gpu_hr(nullptr); // Headless: an own Direct3D 11 device
+    }
+    rt.gpu().set_texture_filtering(texture_filter || (use_settings && settings.texture_filter));
+    if (pgxp_mode < 0) pgxp_mode = use_settings ? settings.pgxp : 2;
+    rt.pgxp().set_enabled(pgxp_mode > 0 && rt.gpu().internal_scale() > 1u);
+    rt.gpu().set_perspective_textures(pgxp_mode >= 2);
+    if (rim_mode >= 0) {
+        rt.gpu().set_rim_light(static_cast<PsxGpu::RimLight>(rim_mode));
+    } else if (use_settings) {
+        rt.gpu().set_rim_light(static_cast<PsxGpu::RimLight>(std::clamp(settings.rim_light, 0, 2)));
+    }
 
 #ifdef VSPORT_HAS_AOT_MODULES
     if (use_aot && !self_demo) {
@@ -342,12 +573,10 @@ int main(int argc, char** argv) {
     if (!disc_path.empty()) {
         std::string err;
         if (!disc.open(disc_path, &err)) {
-            std::cerr << "[HATA] Disk acilamadi: " << err << "\n";
-            return 1;
+            return fail("Disk acilamadi: " + err);
         }
         if (!sbi_path.empty() && !disc.load_sbi(sbi_path, &err)) {
-            std::cerr << "[HATA] " << err << "\n";
-            return 1;
+            return fail(err);
         }
         if (disc.subq_override_count() > 0) {
             std::printf("[vs_host] Alt kanal verisi yuklendi: %s (%zu sektor)\n",
@@ -360,17 +589,30 @@ int main(int argc, char** argv) {
         std::fflush(stdout);
         rt.attach_disc(&disc);
 
+        // Memory card 1: --memcard, else the settings / default saves\VagrantStory_kart1.mcr
+        if (memcard_path.empty()) {
+            memcard_path = (use_settings && !settings.memcard.empty()) ? settings.memcard
+                                                                       : launcher::default_memcard_path();
+        }
+        if (rt.attach_memory_card(0, memcard_path, &err)) {
+            std::printf("[vs_host] Hafiza karti 1: %s (%u blok dolu)\n", memcard_path.string().c_str(),
+                        rt.memory_card(0).used_blocks());
+        } else {
+            std::fprintf(stderr, "[UYARI] Hafiza karti acilamadi, kayit yapilamayacak: %s\n", err.c_str());
+#ifdef _WIN32
+            if (!headless) launcher::show_message("Hafiza karti acilamadi, oyunda kayit yapilamayacak:\n" + err, true);
+#endif
+        }
+
         const auto cnf = disc.parse_system_cnf();
         if (!cnf.has_value()) {
-            std::cerr << "[HATA] SYSTEM.CNF bulunamadi.\n";
-            return 1;
+            return fail("Diskte SYSTEM.CNF bulunamadi; bu bir PlayStation oyun diski degil gibi gorunuyor.");
         }
 
         const auto exe_bytes = disc.extract_file(cnf->boot_path);
         PsxExeImage exe{};
         if (!parse_psx_exe(exe_bytes, exe, &err)) {
-            std::cerr << "[HATA] PS-X EXE ayristirilamadi: " << err << "\n";
-            return 1;
+            return fail("PS-X EXE ayristirilamadi: " + err);
         }
 
         rt.load_exe(exe, ctx);
@@ -383,9 +625,25 @@ int main(int argc, char** argv) {
         if (self_demo) {
             step_hardware_self_demo(rt, 0.55f);
         } else {
-            if (auto_start || !presses.empty()) {
-                rt.set_vblank_callback([&rt, &presses, auto_start]() {
+            if (auto_start || !presses.empty() || series_every > 0 || perf) {
+                rt.set_vblank_callback([&rt, &presses, auto_start, &series_dir, series_every, series_from, perf]() {
                     const u32 vb = rt.vblank_count();
+                    if (perf && vb % 250u == 0) {
+                        // Diagnostics: emulation speed over the last 250 frames (5 s of PAL game time)
+                        static auto last = std::chrono::steady_clock::now();
+                        const auto now = std::chrono::steady_clock::now();
+                        const double sec = std::chrono::duration<double>(now - last).count();
+                        last = now;
+                        std::printf("[perf] kare %u: %.0f fps (%.2fx gercek zaman) | GPU primitif: %llu\n", vb, 250.0 / sec,
+                                    (250.0 / sec) / (rt.gpu().is_pal() ? 50.0 : 60.0), static_cast<unsigned long long>(rt.gpu().primitives_drawn()));
+                        std::fflush(stdout);
+                    }
+                    if (series_every > 0 && vb >= series_from && vb % series_every == 0) {
+                        // Diagnostics: displayed picture every N frames (upscaled when --scale > 1)
+                        char name[32];
+                        std::snprintf(name, sizeof(name), "f%06u.ppm", vb);
+                        rt.gpu().dump_ppm(series_dir / name, false);
+                    }
                     u16 pressed = 0;
                     if (auto_start && vb >= 350u && (vb % 60u) >= 10u && (vb % 60u) <= 18u) {
                         pressed |= pad::START;
@@ -429,6 +687,7 @@ int main(int argc, char** argv) {
             }
         }
 
+        rt.gpu().flush_hr();
         if (!dump_ppm_path.empty()) {
             rt.gpu().dump_ppm(dump_ppm_path, !self_demo);
             std::printf("[vs_host] VRAM goruntusu disari aktarildi: %s\n", dump_ppm_path.string().c_str());
@@ -453,7 +712,7 @@ int main(int argc, char** argv) {
 #ifdef _WIN32
     D3D11Renderer d3d;
     Win32AudioOut audio;
-    Win32HostState host_state{&rt, &ctx, &d3d, &audio, self_demo, false, false, 0.0f};
+    Win32HostState host_state{&rt, &ctx, &d3d, &audio, self_demo};
 
     WNDCLASSA wc{};
     wc.lpfnWndProc   = HostWndProc;
@@ -462,23 +721,52 @@ int main(int argc, char** argv) {
     wc.hCursor       = LoadCursor(nullptr, IDC_ARROW);
     RegisterClassA(&wc);
 
-    RECT wr{0, 0, 960, 720};
-    AdjustWindowRect(&wr, WS_OVERLAPPEDWINDOW, FALSE);
+    // Window client size: height from the settings (720 by default), width from the aspect ratio;
+    // shrunk until it fits the desktop work area
+    if (use_settings) {
+        host_state.aspect     = std::clamp(settings.aspect, 0, launcher::ASPECT_COUNT - 1);
+        host_state.widescreen = settings.widescreen;
+    }
+    int client_h = use_settings ? settings.window_height : 720;
+    RECT work{};
+    SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
+    RECT wr{};
+    for (;;) {
+        wr = RECT{0, 0, launcher::window_width_for(client_h, host_state.aspect), client_h};
+        AdjustWindowRect(&wr, WS_OVERLAPPEDWINDOW, FALSE);
+        if (client_h <= 240 || ((wr.right - wr.left) <= (work.right - work.left) &&
+                                (wr.bottom - wr.top) <= (work.bottom - work.top))) {
+            break;
+        }
+        client_h -= 60;
+    }
+    const int win_w = wr.right - wr.left, win_h = wr.bottom - wr.top;
 
     HWND hwnd = CreateWindowExA(
         0, wc.lpszClassName,
         "Vagrant Story Native Port",
-        WS_OVERLAPPEDWINDOW | WS_VISIBLE,
-        CW_USEDEFAULT, CW_USEDEFAULT,
-        wr.right - wr.left, wr.bottom - wr.top,
+        WS_OVERLAPPEDWINDOW | (hidden_window ? 0u : WS_VISIBLE),
+        work.left + ((work.right - work.left) - win_w) / 2, work.top + ((work.bottom - work.top) - win_h) / 2,
+        win_w, win_h,
         nullptr, nullptr, wc.hInstance, nullptr);
 
     SetWindowLongPtrA(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(&host_state));
 
     if (!sw_present) {
         std::string d3d_err;
-        if (d3d.initialize(hwnd, 960, 720, &d3d_err)) {
-            std::printf("[vs_host] Direct3D 11 aktif (%s) — Shader: %s\n",
+        RECT client{};
+        GetClientRect(hwnd, &client);
+        if (d3d.initialize(hwnd, static_cast<u32>(client.right), static_cast<u32>(client.bottom), &d3d_err)) {
+            if (use_settings) {
+                d3d.set_shader_mode(static_cast<UpscaleShaderMode>(settings.filter));
+                d3d.set_integer_scaling(settings.integer_scale);
+            }
+            // Default: graphics card (settings "renderer" 0); --gpu-hr / --cpu-hr override
+            const bool want_gpu = gpu_hr == 1 || (gpu_hr < 0 && (!use_settings || settings.renderer == 0));
+            if (want_gpu && rt.gpu().internal_scale() > 1u) {
+                use_gpu_hr(d3d.device_handle()); // Shares the window's device: no CPU copy per frame
+            }
+            std::printf("[vs_host] Direct3D 11 aktif (%s) â€” Shader: %s\n",
                         d3d.adapter_name().c_str(), d3d.shader_mode_name());
         } else {
             std::printf("[vs_host] D3D11 baslatilamadi (%s), GDI yedegine geciliyor.\n", d3d_err.c_str());
@@ -487,10 +775,19 @@ int main(int argc, char** argv) {
     if (audio.initialize(PsxSpu::SAMPLE_RATE)) {
         std::printf("[vs_host] WinMM 44.1 kHz Stereo SPU ADPCM ses cikisi aktif.\n");
     }
+    if (hidden_window) audio.set_muted(true); // Test window: silent
     Win32GamepadInput gamepad;
     gamepad.initialize(hwnd);
     std::printf("[vs_host] Gamepad destegi aktif (XInput + DirectInput); kontrolcu istediginiz an takilabilir.\n");
     std::fflush(stdout);
+    if (use_settings) {
+        gamepad.set_button_map(settings.pad_map);
+        audio.set_muted(settings.muted);
+        audio.set_volume(static_cast<u32>(settings.volume));
+        if (settings.fullscreen) {
+            host_state.toggle_fullscreen(hwnd);
+        }
+    }
     host_state.update_window_title(hwnd);
 
     std::vector<u32> frame_bgra;
@@ -540,8 +837,11 @@ int main(int argc, char** argv) {
 
         // Keyboard (only while the game window has focus) + gamepads, merged as active-high
         // PS1 bits, then inverted to the pad's active-low format
-        u16 pressed = gamepad.poll();
-        if (GetForegroundWindow() == hwnd) {
+        u16 pressed = hidden_window ? 0u : gamepad.poll(); // Hidden test window: no real input
+        for (const auto& pr : presses) {                    // Scripted --press, as in headless mode
+            if (rt.vblank_count() >= pr.at_vblank && rt.vblank_count() < pr.at_vblank + pr.frames) pressed |= pr.bits;
+        }
+        if (!hidden_window && GetForegroundWindow() == hwnd) {
             struct KeyBind { int vk; u16 bit; };
             constexpr KeyBind KEYS[] = {
                 {VK_RETURN, pad::START}, {VK_BACK, pad::SELECT},
@@ -558,12 +858,25 @@ int main(int argc, char** argv) {
         // Stream synthesized PS1 SPU 44.1 kHz Stereo PCM to Windows audio ring buffer
         audio.pump_from_spu(rt.spu());
 
+        host_state.apply_gte_widening(hwnd); // Follows window resizes in "fill" mode
         if (d3d.is_initialized()) {
+            const bool dump_now = !window_dump_path.empty() && rt.vblank_count() >= window_dump_frame;
+            if (dump_now) d3d.request_backbuffer_dump(window_dump_path);
             // No vsync: pacing comes from throttle_frame(), not the monitor's refresh rate
-            d3d.present_vram(rt.gpu(), host_state.show_full_vram, host_state.widescreen, false);
+            d3d.present_vram(rt.gpu(), host_state.show_full_vram,
+                             launcher::ASPECT_VALUES[std::clamp(host_state.aspect, 0, launcher::ASPECT_COUNT - 1)], false);
+            if (dump_now) {
+                std::printf("[vs_host] Pencere goruntusu kaydedildi: %s (kare %u)\n", window_dump_path.c_str(), rt.vblank_count());
+                std::fflush(stdout);
+                PostQuitMessage(0);
+                window_dump_path.clear();
+            }
         } else {
             u32 fw = 0, fh = 0;
             rt.gpu().export_bgra8888(frame_bgra, fw, fh, host_state.show_full_vram);
+            if (!host_state.show_full_vram && !rt.gpu().display_enabled()) {
+                std::fill(frame_bgra.begin(), frame_bgra.end(), 0u); // Video output off: black
+            }
 
             RECT cr{};
             GetClientRect(hwnd, &cr);
@@ -586,7 +899,7 @@ int main(int argc, char** argv) {
                 ReleaseDC(hwnd, hdc);
             }
         }
-        throttle_frame();
+        if (!no_throttle) throttle_frame();
     };
 
     if (host_state.self_demo) {
@@ -605,6 +918,14 @@ int main(int argc, char** argv) {
         }
     }
     timeEndPeriod(1);
+    if (use_settings) {
+        // Keep in-game changes (F4 filter, F3 16:9, M mute) for the next start
+        if (d3d.is_initialized()) settings.filter = static_cast<int>(d3d.shader_mode());
+        settings.widescreen = host_state.widescreen;
+        settings.aspect     = host_state.aspect;
+        settings.muted      = audio.is_muted();
+        launcher::save_settings(launcher::settings_path(), settings);
+    }
 #endif
     return 0;
 }

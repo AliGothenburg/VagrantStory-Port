@@ -58,4 +58,13 @@ if (-not $SkipTests -and $CTestExe) {
     }
 }
 
+$GameExe = Join-Path $BuildDir "VagrantStory.exe"
+if (Test-Path $GameExe) {
+    # dist/: the double-click build. VagrantStory.ini (chosen disc) lives next to it and is kept.
+    $DistDir = Join-Path $ProjectRoot "dist"
+    New-Item -ItemType Directory -Force $DistDir | Out-Null
+    Copy-Item $GameExe $DistDir -Force
+    Write-Host "[vsport] Oyun: $(Join-Path $DistDir 'VagrantStory.exe')" -ForegroundColor Green
+}
+
 Write-Host "`n[vsport] Derleme tamamlandi: $BuildDir" -ForegroundColor Green
