@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdarg>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -150,6 +151,36 @@ void step_hardware_self_demo(PsxRuntime& rt, float angle_rad) {
 }
 
 #ifdef _WIN32
+// Start / shutdown steps of the windowed game, written to VagrantStory.log next to the exe, so a
+// start or exit that hangs (no console in the GUI build) shows where it stopped
+FILE* g_host_log = nullptr;
+ULONGLONG g_host_log_t0 = 0;
+
+void host_log(const char* fmt, ...) {
+    if (!g_host_log) return;
+    std::fprintf(g_host_log, "[%8.2f s] ", static_cast<double>(GetTickCount64() - g_host_log_t0) / 1000.0);
+    va_list ap;
+    va_start(ap, fmt);
+    std::vfprintf(g_host_log, fmt, ap);
+    va_end(ap);
+    std::fputc('\n', g_host_log);
+    std::fflush(g_host_log);
+}
+
+// Once quitting has been asked for, a process that has not ended within 8 s (a hang somewhere in
+// shutdown) ends itself, so no windowless game process stays behind (it would also lock the exe)
+void start_exit_watchdog() {
+    static bool started = false;
+    if (started) return;
+    started = true;
+    CloseHandle(CreateThread(nullptr, 0, [](LPVOID) -> DWORD {
+        Sleep(8000);
+        host_log("Kapanis 8 saniyede bitmedi, surec zorla sonlandiriliyor");
+        TerminateProcess(GetCurrentProcess(), 0);
+        return 0;
+    }, nullptr, 0, nullptr));
+}
+
 struct Win32HostState {
     PsxRuntime* rt          = nullptr;
     CpuContext* ctx         = nullptr;
@@ -187,6 +218,7 @@ struct Win32HostState {
         if (rt && rt->gte().widescreen_scale() != k) rt->gte().set_widescreen_scale(k);
     }
     bool fullscreen         = false;
+    bool hidden             = false; // --hidden test window: never shown, not even in fullscreen
     WINDOWPLACEMENT windowed_placement{sizeof(WINDOWPLACEMENT)};
 
     // Borderless fullscreen on the window's current monitor (F11 / Alt+Enter)
@@ -197,18 +229,18 @@ struct Win32HostState {
                 !GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTOPRIMARY), &mi)) {
                 return;
             }
-            SetWindowLongPtrW(hwnd, GWL_STYLE, WS_POPUP | WS_VISIBLE);
+            SetWindowLongPtrW(hwnd, GWL_STYLE, WS_POPUP | (hidden ? 0 : WS_VISIBLE)); // Test window stays hidden
             SetWindowPos(hwnd, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top,
                          mi.rcMonitor.right - mi.rcMonitor.left, mi.rcMonitor.bottom - mi.rcMonitor.top,
                          SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
-            ShowCursor(FALSE);
+            if (!hidden) ShowCursor(FALSE);
             fullscreen = true;
         } else {
-            SetWindowLongPtrW(hwnd, GWL_STYLE, WS_OVERLAPPEDWINDOW | WS_VISIBLE);
+            SetWindowLongPtrW(hwnd, GWL_STYLE, WS_OVERLAPPEDWINDOW | (hidden ? 0 : WS_VISIBLE));
             SetWindowPlacement(hwnd, &windowed_placement);
             SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
                          SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
-            ShowCursor(TRUE);
+            if (!hidden) ShowCursor(TRUE);
             fullscreen = false;
         }
     }
@@ -264,10 +296,11 @@ LRESULT CALLBACK HostWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) 
                     st->toggle_fullscreen(hwnd); // Leave fullscreen first so the dialog is visible
                 }
                 const int answer = MessageBoxW(hwnd,
-                    L"Oyundan Ã§Ä±kmak istiyor musunuz?\n\n"
-                    L"Oyunda kaydetmediÄŸiniz ilerleme kaybolur.",
+                    L"Oyundan çıkmak istiyor musunuz?\n\n"
+                    L"Oyunda kaydetmediğiniz ilerleme kaybolur.",
                     L"Vagrant Story", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2);
                 if (answer == IDYES) {
+                    host_log("Esc: cikis onaylandi");
                     PostQuitMessage(0);
                 }
                 return 0;
@@ -300,7 +333,12 @@ LRESULT CALLBACK HostWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) 
                 std::cout << "[vs_host] VRAM goruntusu kaydedildi: vram_snapshot.ppm\n";
             }
             break;
+        case WM_CLOSE:
+            host_log("Pencere kapatiliyor (WM_CLOSE)");
+            break; // DefWindowProc destroys the window
         case WM_DESTROY:
+            host_log("Pencere yok edildi, cikis istendi");
+            start_exit_watchdog();
             PostQuitMessage(0);
             return 0;
     }
@@ -516,6 +554,17 @@ int main(int argc, char** argv) {
     launcher::GameSettings settings;
     bool use_settings = false;
 
+#ifdef _WIN32
+    if (!headless) {
+        // Windowed game: log start / shutdown steps to VagrantStory.log next to the exe
+        g_host_log_t0 = GetTickCount64();
+        _wfopen_s(&g_host_log, (launcher::settings_path().parent_path() / L"VagrantStory.log").c_str(), L"w");
+        SYSTEMTIME now{};
+        GetLocalTime(&now);
+        host_log("Baslatildi %04u-%02u-%02u %02u:%02u:%02u", now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond);
+    }
+#endif
+
     if (disc_path.empty() && !self_demo) {
 #ifdef _WIN32
         if (!headless) {
@@ -524,9 +573,12 @@ int main(int argc, char** argv) {
             const bool disc_ok = !settings.disc.empty() && std::filesystem::exists(settings.disc, ec);
             const bool shift   = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
             if (settings.show_launcher || shift || !disc_ok) {
+                host_log("Ayarlar penceresi aciliyor");
                 if (!launcher::run_settings_window(settings)) {
+                    host_log("Ayarlar penceresi kapatildi, oyun baslatilmadi");
                     return 0; // Player closed the settings window
                 }
+                host_log("Ayarlar penceresi: Oyna");
             }
             disc_path    = settings.disc;
             sbi_path     = settings.sbi;
@@ -771,6 +823,8 @@ int main(int argc, char** argv) {
         nullptr, nullptr, wc.hInstance, nullptr);
 
     SetWindowLongPtrA(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(&host_state));
+    host_state.hidden = hidden_window;
+    host_log("Oyun penceresi olusturuldu (%s)", hwnd ? "tamam" : "HATA");
 
     if (!sw_present) {
         std::string d3d_err;
@@ -786,18 +840,22 @@ int main(int argc, char** argv) {
             if (want_gpu && rt.gpu().internal_scale() > 1u) {
                 use_gpu_hr(d3d.device_handle()); // Shares the window's device: no CPU copy per frame
             }
-            std::printf("[vs_host] Direct3D 11 aktif (%s) â€” Shader: %s\n",
+            std::printf("[vs_host] Direct3D 11 aktif (%s) - Shader: %s\n",
                         d3d.adapter_name().c_str(), d3d.shader_mode_name());
+            host_log("Direct3D 11: %s, yuksek cozunurluk %s", d3d.adapter_name().c_str(),
+                     rt.gpu().hr_backend() && rt.gpu().hr_backend()->gpu_picture_view() ? "ekran kartinda" : "islemcide");
         } else {
             std::printf("[vs_host] D3D11 baslatilamadi (%s), GDI yedegine geciliyor.\n", d3d_err.c_str());
+            host_log("Direct3D 11 baslatilamadi (%s), GDI", d3d_err.c_str());
         }
     }
     if (audio.initialize(PsxSpu::SAMPLE_RATE)) {
         std::printf("[vs_host] WinMM 44.1 kHz Stereo SPU ADPCM ses cikisi aktif.\n");
     }
-    if (hidden_window) audio.set_muted(true); // Test window: silent
+    host_log("Ses: %s", audio.is_open() ? "acik" : "acilamadi");
     Win32GamepadInput gamepad;
     gamepad.initialize(hwnd);
+    host_log("Kontrolcu girisi hazir");
     std::printf("[vs_host] Gamepad destegi aktif (XInput + DirectInput); kontrolcu istediginiz an takilabilir.\n");
     std::fflush(stdout);
     if (use_settings) {
@@ -806,8 +864,10 @@ int main(int argc, char** argv) {
         audio.set_volume(static_cast<u32>(settings.volume));
         if (settings.fullscreen) {
             host_state.toggle_fullscreen(hwnd);
+            host_log("Tam ekran");
         }
     }
+    if (hidden_window) audio.set_muted(true); // Test window: silent, also with settings
     host_state.update_window_title(hwnd);
 
     std::vector<u32> frame_bgra;
@@ -847,6 +907,8 @@ int main(int argc, char** argv) {
     auto present_and_pump = [&]() {
         while (PeekMessageA(&msg, nullptr, 0, 0, PM_REMOVE)) {
             if (msg.message == WM_QUIT) {
+                host_log("Cikis mesaji alindi, emulasyon durduruluyor");
+                start_exit_watchdog();
                 running    = false;
                 ctx.halted = true;
             }
@@ -929,10 +991,12 @@ int main(int argc, char** argv) {
             present_and_pump();
         }
     } else {
+        host_log("Emulasyon basladi");
         rt.set_vblank_callback(present_and_pump);
         while (running && !ctx.halted) {
             rt.run(ctx, 0x00FF'FFFF'FFFF'FFFFull);
         }
+        host_log(running ? "Emulasyon durdu (islemci durdu), pencere acik" : "Emulasyon durdu");
         while (running) {
             present_and_pump();
         }
@@ -945,6 +1009,21 @@ int main(int argc, char** argv) {
         settings.aspect     = host_state.aspect;
         settings.muted      = audio.is_muted();
         launcher::save_settings(launcher::settings_path(), settings);
+        host_log("Ayarlar kaydedildi");
+    }
+    // Shut down step by step (a hang shows in the log); the rest goes when main returns
+    audio.shutdown();
+    host_log("Ses kapatildi");
+    rt.gpu().set_hr_backend(nullptr); // Before the Direct3D device it may share
+    d3d.shutdown();
+    host_log("Direct3D kapatildi");
+    if (IsWindow(hwnd)) DestroyWindow(hwnd);
+    if (g_host_log) {
+        std::atexit([] {
+            host_log("Surec sonlandi");
+            std::fclose(g_host_log);
+            g_host_log = nullptr;
+        });
     }
 #endif
     return 0;

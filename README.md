@@ -67,6 +67,9 @@ tıklamak yeterlidir (konsol penceresi açılmaz):
 - Ayarlar exe'nin yanındaki `VagrantStory.ini` dosyasına kaydedilir. "Bu pencereyi her açılışta
   göster" kapatılırsa oyun doğrudan açılır; ayarlara dönmek için oyunu **Shift** tuşuna basılı
   tutarak başlatın.
+- Oyunun açılış ve kapanış adımları exe'nin yanındaki `VagrantStory.log` dosyasına yazılır (bir
+  sorun olursa nerede durduğunu gösterir). Kapanış 8 saniyede bitmezse oyun kendini sonlandırır;
+  arka planda penceresiz bir süreç kalmaz.
 - Oyun içinde **F11** / **Alt+Enter** tam ekran, **F4** filtre, **F3** görüntü oranı (sırayla),
   **Shift+F3** 3D genişletme, **M** ses; bu değişiklikler de kaydedilir. **Esc** çıkış (onay sorulur).
 - **İç çözünürlük** 3D sahneyi 2×–4× çözünürlükte çizer: polygon kenarları ve doku eşlemesi
