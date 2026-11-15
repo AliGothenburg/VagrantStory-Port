@@ -65,10 +65,10 @@ GameSettings load_settings(const std::filesystem::path& ini) {
         else if (key == "scale")         legacy_scale = clamp_int(num, 2, 9); // Older ini: 320x240 * scale
         else if (key == "window_height") { s.window_height = clamp_int(num, 240, 4320); have_height = true; }
         else if (key == "aspect")        { s.aspect = clamp_int(num, 0, ASPECT_COUNT - 1); have_aspect = true; }
-        else if (key == "internal_scale") s.internal_scale = clamp_int(num, 1, 6);
+        else if (key == "internal_scale") s.internal_scale = clamp_int(num, 1, 8);
         else if (key == "renderer")      s.renderer = clamp_int(num, 0, 1);
         else if (key == "gpu")           s.gpu = val;
-        else if (key == "texture_filter") s.texture_filter = num != 0;
+        else if (key == "texture_filter") s.texture_filter = clamp_int(num, 0, 2);
         else if (key == "rim_light")     s.rim_light = clamp_int(num, 0, 2);
         else if (key == "pgxp")          s.pgxp = clamp_int(num, 0, 2);
         else if (key == "filter")        s.filter = clamp_int(num, 0, 2);
@@ -79,6 +79,13 @@ GameSettings load_settings(const std::filesystem::path& ini) {
         else if (key == "show_launcher") s.show_launcher = num != 0;
         else if (key == "rumble")        s.rumble = num != 0;
         else if (key == "autosave")      s.autosave = num != 0;
+        else if (key == "cheats")        s.cheats = num != 0;
+        else if (key == "reverb")        s.reverb = num != 0;
+        else if (key == "audio_cubic")   s.audio_cubic = num != 0;
+        else if (key == "texture_pack")  s.texture_pack = num != 0;
+        else if (key == "frame_interp")  s.frame_interp = num != 0;
+        else if (key == "runahead")      s.runahead = clamp_int(num, 0, 3);
+        else if (key == "texture_dump")  s.texture_dump = num != 0;
         else if (key == "rewind")        s.rewind = num != 0;
         else if (key == "cpu_overclock") s.cpu_overclock = clamp_int(num, 100, 400);
         else if (key.rfind("pad_", 0) == 0) {
@@ -107,7 +114,8 @@ void save_settings(const std::filesystem::path& ini, const GameSettings& s) {
     out << "renderer=" << s.renderer << "\n";
     out << "# gpu: ekran karti adi; bos = otomatik (en guclu)\n";
     out << "gpu=" << s.gpu << "\n";
-    out << "texture_filter=" << (s.texture_filter ? 1 : 0) << "\n";
+    out << "# texture_filter: 3D doku filtresi 0=kapali 1=yumusak (bilinear) 2=keskin yumusatma\n";
+    out << "texture_filter=" << s.texture_filter << "\n";
     out << "# rim_light: karakter kenar isigi 0=yumusak 1=keskin 2=kapali\n";
     out << "rim_light=" << s.rim_light << "\n";
     out << "# pgxp: kose hassasiyeti 0=kapali (orijinal) 1=titreme duzeltmesi 2=titreme duzeltmesi + perspektifli doku\n";
@@ -123,6 +131,18 @@ void save_settings(const std::filesystem::path& ini, const GameSettings& s) {
     out << "# autosave: cikarken durumu kaydet, acilista kaldigin yerden devam et; rewind: F8 ile geri sarma\n";
     out << "autosave=" << (s.autosave ? 1 : 0) << "\n";
     out << "rewind=" << (s.rewind ? 1 : 0) << "\n";
+    out << "# cheats: VagrantStory_hileler.txt dosyasindaki hile kodlarini uygula\n";
+    out << "cheats=" << (s.cheats ? 1 : 0) << "\n";
+    out << "# reverb: PS1 yanki birimi; audio_cubic: kubik ses ara degerlemesi\n";
+    out << "reverb=" << (s.reverb ? 1 : 0) << "\n";
+    out << "audio_cubic=" << (s.audio_cubic ? 1 : 0) << "\n";
+    out << "# texture_pack: dokular klasorundeki degistirme dokulari; texture_dump: dokulari dokular\\_dokum klasorune dok\n";
+    out << "texture_pack=" << (s.texture_pack ? 1 : 0) << "\n";
+    out << "# frame_interp: ara kare uretimi (25 -> 50 fps, ekran karti cizimi)\n";
+    out << "frame_interp=" << (s.frame_interp ? 1 : 0) << "\n";
+    out << "# runahead: gecikme azaltma, ileri calistirilan kare sayisi (0-3)\n";
+    out << "runahead=" << s.runahead << "\n";
+    out << "texture_dump=" << (s.texture_dump ? 1 : 0) << "\n";
     out << "# cpu_overclock: emule edilen islemci hizi, yuzde (100 = orijinal)\n";
     out << "cpu_overclock=" << s.cpu_overclock << "\n";
     out << "# Kontrolcu tuslari: pad_<PS1 tusu>=<kontrolcude o konumdaki tus> (none = atanmamis)\n";
@@ -233,7 +253,7 @@ enum ControlId : int {
     ID_RES_COMBO, ID_TEXFILTER_CHECK,
     ID_CARD_EDIT, ID_CARD_CHANGE, ID_CARD_OPEN,
     ID_MUTE_CHECK, ID_VOLUME_SLIDER, ID_VOLUME_LABEL,
-    ID_SHOW_CHECK, ID_ASPECT_COMBO, ID_RIM_COMBO, ID_PGXP_COMBO, ID_RENDERER_COMBO, ID_GPU_COMBO, ID_RUMBLE_CHECK, ID_OVERCLOCK_COMBO, ID_AUTOSAVE_CHECK, ID_REWIND_CHECK,
+    ID_SHOW_CHECK, ID_ASPECT_COMBO, ID_RIM_COMBO, ID_PGXP_COMBO, ID_RENDERER_COMBO, ID_GPU_COMBO, ID_RUMBLE_CHECK, ID_OVERCLOCK_COMBO, ID_AUTOSAVE_CHECK, ID_REWIND_CHECK, ID_CHEATS_CHECK, ID_CHEATS_OPEN, ID_REVERB_CHECK, ID_CUBIC_CHECK, ID_TEXPACK_CHECK, ID_TEXPACK_OPEN, ID_TEXDUMP_CHECK, ID_INTERP_CHECK, ID_RUNAHEAD_COMBO,
     ID_PAD_COMBO0 = 300, // .. ID_PAD_COMBO0 + REMAP_COUNT - 1
     ID_PAD_DEFAULTS = 400,
     ID_NAV0 = 500,       // .. ID_NAV0 + PAGE_COUNT - 1: page buttons on the left
@@ -444,8 +464,9 @@ void build_controls(LauncherState& st) {
     label(L"İç çözünürlük:", y);
     add_combo(st, CX, y, CW, ID_RES_COMBO,
               {L"1×  orijinal (320 × 240)", L"2×  (640 × 480)", L"3×  (960 × 720)", L"4×  (1280 × 960)",
-               L"5×  (1600 × 1200) — 1080p ekranlar", L"6×  (1920 × 1440) — 1440p ekranlar"},
-              clamp_int(s.internal_scale, 1, 6) - 1);
+               L"5×  (1600 × 1200) — 1080p ekranlar", L"6×  (1920 × 1440) — 1440p ekranlar",
+               L"7×  (2240 × 1680) — kenar yumuşatma", L"8×  (2560 × 1920) — kenar yumuşatma, güçlü ekran kartı"},
+              clamp_int(s.internal_scale, 1, 8) - 1);
     y += 34;
     label(L"Çizim:", y);
     add_combo(st, CX, y, CW, ID_RENDERER_COMBO, {L"Ekran kartı (önerilen)", L"İşlemci"}, clamp_int(s.renderer, 0, 1));
@@ -466,8 +487,17 @@ void build_controls(LauncherState& st) {
     label(L"Köşe hassasiyeti:", y);
     add_combo(st, CX, y, CW, ID_PGXP_COMBO, {L"Kapalı (orijinal titreme)", L"Titreme düzeltmesi", L"Titreme + perspektifli doku"},
               clamp_int(s.pgxp, 0, 2));
-    y += 38;
-    add_check(st, L"3D dokuları yumuşat (iç çözünürlük 2× ve üstünde)", LX, y, IW, 20, ID_TEXFILTER_CHECK, s.texture_filter);
+    y += 34;
+    label(L"3D doku filtresi:", y);
+    add_combo(st, CX, y, CW, ID_TEXFILTER_CHECK, {L"Kapalı (keskin pikseller)", L"Yumuşak (bilinear)", L"Keskin yumuşatma"},
+              clamp_int(s.texture_filter, 0, 2));
+    y += 34;
+    make(st, L"STATIC", L"Kenar yumuşatma: iç çözünürlük pencereden büyükse görüntü ortalanarak küçültülür "
+                        L"(süper örnekleme). 1080p ekranda 7× ya da 8× seçin.",
+         SS_LEFT, LX, y, IW, 36, 0);
+    y += 44;
+    add_check(st, L"Ara kare üretimi: 25 yerine 50 fps görüntü (ekran kartı çizimi, 2× ve üstü; deneysel)", LX, y, IW, 20,
+              ID_INTERP_CHECK, s.frame_interp);
 
     // --- Ekran: window, aspect ratio, filter ---
     y = begin_page(PAGE_DISPLAY);
@@ -490,7 +520,7 @@ void build_controls(LauncherState& st) {
               ID_INTEGER_CHECK, s.integer_scale);
     y += 28;
     add_check(st, L"3D sahneyi orana göre genişlet (kapalıysa görüntü esnetilir;\n"
-                  L"deneysel: kenarlarda boşluklar görülebilir)",
+                  L"2D yazılar ve göstergeler yatayda esner)",
               LX, y, IW, 36, ID_WIDE_CHECK, s.widescreen, BS_MULTILINE);
 
     // --- Ses ---
@@ -503,6 +533,10 @@ void build_controls(LauncherState& st) {
     SendMessageW(vol, TBM_SETPAGESIZE, 0, 10);
     SendMessageW(vol, TBM_SETPOS, TRUE, clamp_int(s.volume, 0, 100));
     make(st, L"STATIC", L"", SS_LEFT, CX + CW + 14, y + 3, 50, 20, ID_VOLUME_LABEL);
+    y += 44;
+    add_check(st, L"Yankı (PS1 reverb birimi: mekân ve zindan yankısı)", LX, y, IW, 20, ID_REVERB_CHECK, s.reverb);
+    y += 28;
+    add_check(st, L"Kübik ses ara değerlemesi (daha temiz tizler; kapalıyken doğrusal)", LX, y, IW, 20, ID_CUBIC_CHECK, s.audio_cubic);
 
     // --- Kontroller: which controller button acts as each PS1 button ---
     y = begin_page(PAGE_CONTROLS);
@@ -539,7 +573,7 @@ void build_controls(LauncherState& st) {
                         L"yavaşlamaları azalır. Oyun hızlanmaz; bilgisayarın işlemcisi daha çok çalışır.",
          SS_LEFT, LX, y, IW, 36, 0);
 
-    y += 52;
+    y += 46;
     make(st, L"STATIC", L"Anlık kayıt (oyunun kendi kayıt noktalarından bağımsız):  F5 kaydet,  F7 yükle,  "
                         L"F6 kayıt yuvasını değiştir (1–5).",
          SS_LEFT, LX, y, IW, 36, 0);
@@ -548,6 +582,26 @@ void build_controls(LauncherState& st) {
     y += 28;
     add_check(st, L"Geri sarma: F8 basılı tutulunca son ~30 saniye geri sarılır (~110 MB bellek)", LX, y, IW, 20,
               ID_REWIND_CHECK, s.rewind);
+
+    y += 32;
+    add_check(st, L"Hile kodlarını uygula (GameShark biçimi)", LX, y + 4, 300, 20, ID_CHEATS_CHECK, s.cheats);
+    make(st, L"BUTTON", L"Hile dosyasını aç…", BS_PUSHBUTTON | tab, LX + IW - 160, y, 160, 28, ID_CHEATS_OPEN);
+
+    y += 34;
+    add_check(st, L"Doku paketi kullan (\"dokular\" klasörü; 2× ve üstü iç çözünürlükte)", LX, y + 4, IW - 170, 20,
+              ID_TEXPACK_CHECK, s.texture_pack);
+    make(st, L"BUTTON", L"Doku klasörünü aç…", BS_PUSHBUTTON | tab, LX + IW - 160, y, 160, 28, ID_TEXPACK_OPEN);
+    y += 32;
+    add_check(st, L"Oyunun dokularını dök (paket hazırlamak için, dokular\\_dokum klasörüne)", LX, y, IW, 20,
+              ID_TEXDUMP_CHECK, s.texture_dump);
+    y += 32;
+    label(L"Gecikme azaltma:", y);
+    add_combo(st, CX, y, CW, ID_RUNAHEAD_COMBO,
+              {L"Kapalı", L"1 kare (20 ms, önerilen)", L"2 kare (40 ms, güçlü işlemci)", L"3 kare (60 ms, çok güçlü işlemci)"},
+              clamp_int(s.runahead, 0, 3));
+    y += 28;
+    make(st, L"STATIC", L"Tuşa basışın sonucu bu kadar erken görünür (emülasyon 2–4 kat çalışır; ara kare üretimi kapanır).",
+         SS_LEFT, LX, y, IW, 20, 0);
 
     // --- Footer (always visible) ---
     st.building_page = -1;
@@ -569,11 +623,11 @@ void read_controls(LauncherState& st) {
     s.fullscreen    = SendMessageW(item(st, ID_MODE_COMBO), CB_GETCURSEL, 0, 0) == 1;
     s.window_height = selected_window_height(st);
     s.aspect        = clamp_int(static_cast<int>(SendMessageW(item(st, ID_ASPECT_COMBO), CB_GETCURSEL, 0, 0)), 0, ASPECT_COUNT - 1);
-    s.internal_scale = clamp_int(static_cast<int>(SendMessageW(item(st, ID_RES_COMBO), CB_GETCURSEL, 0, 0)) + 1, 1, 6);
+    s.internal_scale = clamp_int(static_cast<int>(SendMessageW(item(st, ID_RES_COMBO), CB_GETCURSEL, 0, 0)) + 1, 1, 8);
     s.renderer      = clamp_int(static_cast<int>(SendMessageW(item(st, ID_RENDERER_COMBO), CB_GETCURSEL, 0, 0)), 0, 1);
     const int gpu_sel = static_cast<int>(SendMessageW(item(st, ID_GPU_COMBO), CB_GETCURSEL, 0, 0));
     s.gpu = (gpu_sel >= 1 && gpu_sel <= static_cast<int>(st.gpus.size())) ? st.gpus[static_cast<std::size_t>(gpu_sel - 1)] : std::string();
-    s.texture_filter = SendMessageW(item(st, ID_TEXFILTER_CHECK), BM_GETCHECK, 0, 0) == BST_CHECKED;
+    s.texture_filter = clamp_int(static_cast<int>(SendMessageW(item(st, ID_TEXFILTER_CHECK), CB_GETCURSEL, 0, 0)), 0, 2);
     s.rim_light     = clamp_int(static_cast<int>(SendMessageW(item(st, ID_RIM_COMBO), CB_GETCURSEL, 0, 0)), 0, 2);
     s.pgxp          = clamp_int(static_cast<int>(SendMessageW(item(st, ID_PGXP_COMBO), CB_GETCURSEL, 0, 0)), 0, 2);
     s.filter        = clamp_int(static_cast<int>(SendMessageW(item(st, ID_FILTER_COMBO), CB_GETCURSEL, 0, 0)), 0, 2);
@@ -584,8 +638,15 @@ void read_controls(LauncherState& st) {
     s.show_launcher = SendMessageW(item(st, ID_SHOW_CHECK), BM_GETCHECK, 0, 0) == BST_CHECKED;
     s.rumble        = SendMessageW(item(st, ID_RUMBLE_CHECK), BM_GETCHECK, 0, 0) == BST_CHECKED;
     s.autosave      = SendMessageW(item(st, ID_AUTOSAVE_CHECK), BM_GETCHECK, 0, 0) == BST_CHECKED;
+    s.cheats        = SendMessageW(item(st, ID_CHEATS_CHECK), BM_GETCHECK, 0, 0) == BST_CHECKED;
+    s.texture_pack  = SendMessageW(item(st, ID_TEXPACK_CHECK), BM_GETCHECK, 0, 0) == BST_CHECKED;
+    s.frame_interp  = SendMessageW(item(st, ID_INTERP_CHECK), BM_GETCHECK, 0, 0) == BST_CHECKED;
+    s.texture_dump  = SendMessageW(item(st, ID_TEXDUMP_CHECK), BM_GETCHECK, 0, 0) == BST_CHECKED;
+    s.reverb        = SendMessageW(item(st, ID_REVERB_CHECK), BM_GETCHECK, 0, 0) == BST_CHECKED;
+    s.audio_cubic   = SendMessageW(item(st, ID_CUBIC_CHECK), BM_GETCHECK, 0, 0) == BST_CHECKED;
     s.rewind        = SendMessageW(item(st, ID_REWIND_CHECK), BM_GETCHECK, 0, 0) == BST_CHECKED;
     s.cpu_overclock = OVERCLOCK_VALUES[clamp_int(static_cast<int>(SendMessageW(item(st, ID_OVERCLOCK_COMBO), CB_GETCURSEL, 0, 0)), 0, 3)];
+    s.runahead      = clamp_int(static_cast<int>(SendMessageW(item(st, ID_RUNAHEAD_COMBO), CB_GETCURSEL, 0, 0)), 0, 3);
     for (std::size_t i = 0; i < pad::REMAP_COUNT; ++i) {
         const auto sel = SendMessageW(item(st, ID_PAD_COMBO0 + static_cast<int>(i)), CB_GETCURSEL, 0, 0);
         s.pad_map[i] = static_cast<s8>(sel <= 0 ? -1 : sel - 1);
@@ -707,6 +768,36 @@ LRESULT CALLBACK LauncherWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
                 case ID_ASPECT_COMBO:
                     if (HIWORD(wparam) == CBN_SELCHANGE) fill_window_sizes(*st, selected_window_height(*st));
                     return 0;
+                case ID_TEXPACK_OPEN: {
+                    std::error_code ec;
+                    std::filesystem::create_directories(texture_pack_dir(), ec);
+                    ShellExecuteW(hwnd, L"open", texture_pack_dir().wstring().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+                    return 0;
+                }
+                case ID_CHEATS_OPEN: {
+                    // Create the file with an explanation on first use, then open it in the text editor
+                    const auto path = cheats_path();
+                    std::error_code ec;
+                    if (!std::filesystem::exists(path, ec)) {
+                        std::ofstream out(path, std::ios::binary);
+                        out << "\xEF\xBB\xBF"
+                               "# Vagrant Story hile kodlari (GameShark / Action Replay bicimi)\r\n"
+                               "#\r\n"
+                               "# Kodlar oyunun SURUMUNE ozeldir: diskinizin surumu icin yazilmis kodlari kullanin\r\n"
+                               "# (Avrupa: SLES-02754, ABD: SLUS-01040, Japonya: SLPS-02377).\r\n"
+                               "#\r\n"
+                               "# [Hile adi]            -> bir hile baslatir (acik)\r\n"
+                               "# [Hile adi] off        -> kapali bir hile\r\n"
+                               "# 80012345 03E7         -> kod satirlari (bu satir yalnizca ornektir)\r\n"
+                               "#\r\n"
+                               "# Desteklenen kod turleri: 80 (16 bit yaz), 30 (8 bit yaz),\r\n"
+                               "# D0-D3 ve E0-E3 (kosul: sonraki satir yalnizca kosul saglaninca calisir).\r\n"
+                               "# Degisiklikler oyunun bir sonraki acilisinda gecerli olur.\r\n"
+                               "\r\n";
+                    }
+                    ShellExecuteW(hwnd, L"open", L"notepad.exe", (L"\"" + path.wstring() + L"\"").c_str(), nullptr, SW_SHOWNORMAL);
+                    return 0;
+                }
                 case ID_PAD_DEFAULTS:
                     pad_select(*st, pad::default_button_map());
                     return 0;
@@ -752,6 +843,14 @@ std::filesystem::path settings_path() {
 
 std::filesystem::path default_memcard_path() {
     return settings_path().parent_path() / "saves" / "VagrantStory_kart1.mcr";
+}
+
+std::filesystem::path cheats_path() {
+    return settings_path().parent_path() / "VagrantStory_hileler.txt";
+}
+
+std::filesystem::path texture_pack_dir() {
+    return settings_path().parent_path() / "dokular";
 }
 
 namespace {
@@ -870,6 +969,8 @@ void dump_settings_window(GameSettings s, const std::filesystem::path& dir) { ru
 void show_message(const std::string&, bool) {}
 std::filesystem::path settings_path() { return "VagrantStory.ini"; }
 std::filesystem::path default_memcard_path() { return "saves/VagrantStory_kart1.mcr"; }
+std::filesystem::path cheats_path() { return "VagrantStory_hileler.txt"; }
+std::filesystem::path texture_pack_dir() { return "dokular"; }
 bool run_settings_window(GameSettings&) { return false; }
 void dump_settings_window(GameSettings, const std::filesystem::path&) {}
 

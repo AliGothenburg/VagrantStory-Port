@@ -1022,6 +1022,7 @@ void PsxRuntime::tick_hardware(CpuContext& ctx, u64 elapsed_cycles) {
     if (vblank_accum_ >= VBLANK_PERIOD) {
         vblank_accum_ -= VBLANK_PERIOD;
         ++vblank_frames_;
+        gpu_.on_vblank();
         // Save memory card changes to disk once the game has stopped writing for ~0.5 s
         if ((memcards_[0].dirty() || memcards_[1].dirty()) && vblank_frames_ - memcard_last_write_vb_ > 25u) {
             flush_memory_cards();

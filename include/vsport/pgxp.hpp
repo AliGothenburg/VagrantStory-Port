@@ -39,10 +39,12 @@ public:
     void clear() { map_.clear(); }
     void begin_frame() {
         ++frame_;
-        if (map_.size() > 200000u) {
-            for (auto it = map_.begin(); it != map_.end();) {
-                it = (frame_ - it->second.frame > MAX_AGE_FRAMES) ? map_.erase(it) : std::next(it);
-            }
+        if (map_.size() > 200000u) prune();
+    }
+    // Drops entries too old to be used (runahead copies the cache every frame: keep it small)
+    void prune() {
+        for (auto it = map_.begin(); it != map_.end();) {
+            it = (frame_ - it->second.frame > MAX_AGE_FRAMES) ? map_.erase(it) : std::next(it);
         }
     }
 

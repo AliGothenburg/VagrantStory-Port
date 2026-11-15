@@ -1,5 +1,6 @@
 #include "vsport/cdrom_iso.hpp"
 #include "vsport/cfg_lifter.hpp"
+#include "vsport/cheats.hpp"
 #include "vsport/gte.hpp"
 #include "vsport/memcard.hpp"
 #include "vsport/mips_decoder.hpp"
@@ -731,6 +732,40 @@ void test_save_state_round_trip() {
     CHECK(!rt.load_state(wrong, ctx), "Foreign file is rejected");
 }
 
+// Cheat codes: writes, conditions, switched-off cheats and lines that cannot be read
+void test_cheat_codes() {
+    CheatList list;
+    std::vector<std::string> problems;
+    list.parse("# comment\n"
+               "[HP]\n"
+               "80010000 03E7\n"
+               "30010010 00FF\n"
+               "[Conditional]\n"
+               "D0010020 1234\n"
+               "80010022 AAAA\n"
+               "E1010030 0005\n"
+               "30010031 0077\n"
+               "[Disabled] off\n"
+               "80010040 BEEF\n"
+               "50010000 0000\n"
+               "nonsense\n",
+               &problems);
+    CHECK(list.cheats().size() == 3u && list.enabled_count() == 2u, "Three cheats parsed, one switched off");
+    CHECK(problems.size() == 2u, "Unsupported type and unreadable line are reported");
+
+    PsxRuntime rt;
+    rt.write16(0x80010020u, 0x1111u); // D0 condition false -> next line skipped
+    rt.write8(0x80010030u, 5u);       // E1 (not equal 5) false -> next line skipped
+    list.apply(rt);
+    CHECK(rt.read16(0x80010000u) == 0x03E7u && rt.read8(0x80010010u) == 0xFFu, "16-bit and 8-bit writes");
+    CHECK(rt.read16(0x80010022u) == 0u && rt.read8(0x80010031u) == 0u, "Failed conditions skip the next line");
+    CHECK(rt.read16(0x80010040u) == 0u, "Switched-off cheat is not applied");
+    rt.write16(0x80010020u, 0x1234u);
+    rt.write8(0x80010030u, 6u);
+    list.apply(rt);
+    CHECK(rt.read16(0x80010022u) == 0xAAAAu && rt.read8(0x80010031u) == 0x77u, "Met conditions run the next line");
+}
+
 // GP1(03h) display off: the picture must be black (the game hides VRAM set-up before movies)
 void test_gpu_display_off_is_black() {
     PsxGpu gpu;
@@ -1110,6 +1145,7 @@ int main() {
     test_gpu_exact_vertex_positions();
     test_gpu_perspective_textures();
     test_save_state_round_trip();
+    test_cheat_codes();
     test_gpu_display_off_is_black();
     test_gpu_otc_and_dma_linked_list();
     test_interpreter_and_lifter_pipeline();

@@ -115,8 +115,28 @@ float3 SampleBilinear(float2 tex_coord) {
     return lerp(lerp(c00, c10, f.x), lerp(c01, c11, f.x), f.y);
 }
 
+// Supersampling: when the upscaled picture is larger than the window, every screen pixel shows
+// the average of the picture pixels it covers (2x2 .. 4x4 taps) instead of picking a few of them.
+// This is what smooths polygon edges when the internal resolution is above the window's.
+float3 SampleArea(float2 tex_coord, float2 ratio) {
+    const int n = clamp(int(ceil(max(ratio.x, ratio.y))), 2, 4);
+    float3 sum = float3(0.0f, 0.0f, 0.0f);
+    for (int j = 0; j < n; ++j) {
+        for (int i = 0; i < n; ++i) {
+            const float2 off = ((float2(i, j) + 0.5f) / float(n) - 0.5f) * ratio;
+            sum += SampleBilinear(tex_coord + off);
+        }
+    }
+    return sum / float(n * n);
+}
+
 float4 PSMain(VSOut pin) : SV_TARGET {
     float2 tex_coord = pin.uv * disp_size;
+
+    const float2 ratio = disp_size / max(view_size, float2(1.0f, 1.0f));
+    if (shader_mode != 2u && use_hr != 0u && max(ratio.x, ratio.y) > 1.05f) {
+        return float4(SampleArea(tex_coord, max(ratio, float2(1.0f, 1.0f))), 1.0f);
+    }
 
     if (shader_mode == 0u) {
         // Sharp Sub-Texel Anti-Shimmer Filter
@@ -434,7 +454,7 @@ void D3D11Renderer::present_vram(const PsxGpu& gpu, bool full_vram, float aspect
     ID3D11ShaderResourceView* gpu_view = nullptr;
     if (hr_mode) {
         if (HrBackend* b = gpu.hr_backend(); b && b->gpu_device() == impl_->device.Get()) {
-            gpu_view = static_cast<ID3D11ShaderResourceView*>(b->gpu_picture_view());
+            gpu_view = static_cast<ID3D11ShaderResourceView*>(gpu.display_picture_view()); // Main or in-between picture
         }
     }
     const bool use_hr = hr_mode && (gpu_view != nullptr ||

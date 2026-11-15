@@ -12,6 +12,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <functional>
 #include <iostream>
 #include <string>
@@ -264,6 +265,7 @@ int main() {
     Opts win; win.window = true;
     run("doku penceresi (E2)", 4u, win);
     run("doku yumusatma", 5u, Opts{}, [](PsxGpu& g) { g.set_texture_filtering(true); });
+    run("keskin doku yumusatma", 5u, Opts{}, [](PsxGpu& g) { g.set_texture_filtering(true); g.set_texture_filter_sharp(true); });
     {
         Opts rim; rim.sprites = false;
         run("kenar isigi yumusak", 9u, rim, [](PsxGpu& g) { g.set_rim_light(PsxGpu::RimLight::Soft); });
@@ -318,6 +320,109 @@ int main() {
         }
         const u32 d = compare("kendi alanindan dokulanan sprite + kopya", warp.dev, cmd, TOL);
         CHECK(d <= LIMIT, "self-texturing: " << d << " pixels differ");
+    }
+
+    // Texture replacement: dump the textures of a random scene, make 4x replacements with a
+    // pattern and transparent holes, then both backends must draw them the same way
+    {
+        namespace fs = std::filesystem;
+        const fs::path root = fs::temp_directory_path() / "vsport_texrep_test";
+        std::error_code ec;
+        fs::remove_all(root, ec);
+        Rng rng{11u};
+        std::vector<u32> cmd;
+        setup(cmd, rng);
+        Opts o; o.semi = true; o.count = 250;
+        random_prims(cmd, rng, o, nullptr);
+        TextureReplacer dumper;
+        dumper.set_dump_dir(root / "_dokum");
+        {
+            PsxGpu g;
+            g.set_internal_scale(S);
+            g.set_texture_replacer(&dumper);
+            for (u32 w : cmd) g.write_gp0(w);
+            g.flush_hr();
+        }
+        u32 made = 0;
+        for (const auto& e : fs::directory_iterator(root / "_dokum", ec)) {
+            TexImage src, big;
+            if (!load_png(e.path(), src)) continue;
+            big.w = src.w * 4; big.h = src.h * 4;
+            big.rgba.resize(static_cast<std::size_t>(big.w) * big.h);
+            for (u32 y = 0; y < big.h; ++y) {
+                for (u32 x = 0; x < big.w; ++x) {
+                    u32 c = src.rgba[static_cast<std::size_t>(y / 4) * src.w + x / 4];
+                    if (((x ^ y) & 4u) != 0) c = (c & 0xFF000000u) | (~c & 0x00FFFFFFu); // Detail finer than a texel
+                    if (((x * 7 + y * 3) % 23) == 0) c &= 0x00FFFFFFu;                   // Transparent specks
+                    big.rgba[static_cast<std::size_t>(y) * big.w + x] = c;
+                }
+            }
+            if (save_png(root / e.path().filename(), big)) ++made;
+        }
+        CHECK(dumper.stats.dumped > 0 && made == dumper.stats.dumped, "texture dump: " << dumper.stats.dumped << " dumped, " << made << " replaced");
+        TextureReplacer pack;
+        const std::size_t indexed = pack.scan(root);
+        CHECK(indexed == made, "texture pack index: " << indexed << " of " << made);
+        const u32 d = compare("doku degistirme paketi", warp.dev, cmd, TOL, [&](PsxGpu& g) { g.set_texture_replacer(&pack); });
+        CHECK(d <= LIMIT, "texture replacement: " << d << " pixels differ");
+        CHECK(pack.stats.hits > 0, "texture replacement: no hits");
+        std::printf("    (%llu doku dokuldu, %llu isabet)\n", static_cast<unsigned long long>(dumper.stats.dumped),
+                    static_cast<unsigned long long>(pack.stats.hits));
+        fs::remove_all(root, ec);
+    }
+
+    // Frame interpolation: a triangle drawn at x = 40 in one frame and at x = 80 in the
+    // next (double buffered, the second buffer 320 pixels to the right) must appear at x = 60 in
+    // the in-between picture, shown for one vblank before the new frame
+    {
+        PsxGpu g;
+        g.set_internal_scale(S);
+        std::string err;
+        auto b = make_d3d11_hr_backend(warp.dev, &err);
+        CHECK(b != nullptr, "interpolation: D3D11 backend: " << err);
+        if (b) {
+            g.set_hr_backend(std::move(b));
+            g.set_frame_interpolation(true);
+            Rng rng{12u};
+            std::vector<u32> init;
+            setup(init, rng);
+            for (u32 w : init) g.write_gp0(w);
+            g.write_gp1(0x05000000u | (256u << 10)); // Displaying elsewhere before the first frame
+            const auto frame = [&](s32 buf_x, s32 tri_x) {
+                g.write_gp0(0xE3000000u | static_cast<u32>(buf_x));                       // Draw area of this buffer
+                g.write_gp0(0xE4000000u | (239u << 10) | static_cast<u32>(buf_x + 319));
+                g.write_gp0(0xE5000000u | static_cast<u32>(buf_x));                       // Offset = buffer
+                g.write_gp0(0x02000000u);                                                 // Clear to black
+                g.write_gp0(xy(buf_x, 0));
+                g.write_gp0((240u << 16) | 320u);
+                g.write_gp0(0x20FFFFFFu);                                                 // White triangle
+                g.write_gp0(xy(tri_x, 50));
+                g.write_gp0(xy(tri_x + 40, 50));
+                g.write_gp0(xy(tri_x, 90));
+                g.write_gp1(0x05000000u | static_cast<u32>(buf_x));                       // Show this buffer
+            };
+            frame(0, 40);
+            g.on_vblank(); g.on_vblank();
+            frame(320, 80); // The game draws in the other buffer
+            const bool shown = g.showing_interpolated();
+            CHECK(shown, "interpolation: no in-between picture after a 2-vblank frame");
+            const std::vector<u32>* alt = g.hr_backend() ? g.hr_backend()->alt_picture() : nullptr;
+            CHECK(alt != nullptr, "interpolation: no alternate picture");
+            if (alt) {
+                // Leftmost lit pixel of row 60 (native) inside the displayed buffer
+                const u32 w = PsxGpu::VRAM_WIDTH * S;
+                s32 left = -1;
+                for (u32 x = 320 * S; x < 640 * S && left < 0; ++x) {
+                    if (((*alt)[static_cast<std::size_t>(60 * S) * w + x] & 0xFFFFFFu) != 0) left = static_cast<s32>(x / S) - 320;
+                }
+                std::printf("  %-34s triangle at x %d (expected 60)\n", "ara kare (iki kare arasi)", left);
+                CHECK(left >= 59 && left <= 61, "interpolation: triangle at x " << left << ", expected 60");
+            }
+            g.on_vblank();
+            CHECK(g.showing_interpolated(), "interpolation: in-between picture must stay for the next presented vblank");
+            g.on_vblank();
+            CHECK(!g.showing_interpolated(), "interpolation: the new frame must follow");
+        }
     }
 
     if (g_failures == 0) {

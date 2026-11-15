@@ -67,6 +67,8 @@ void PsxSpu::reset() {
     xa_hist_r2_      = 0;
     cd_audio_fifo_.clear();
 
+    rev_addr_ = 0; rev_phase_ = false;
+    rev_acc_l_ = rev_acc_r_ = rev_out_l_ = rev_out_r_ = 0;
     cycle_accum_        = 0;
     bytes_uploaded_     = 0;
     key_on_events_      = 0;
@@ -189,6 +191,9 @@ void PsxSpu::write_reg16(u32 paddr, u16 val) {
             for (u32 i = 0; i < 8u; ++i) {
                 if ((val & (1u << i)) != 0) key_off_voice(16u + i);
             }
+            break;
+        case 0x1F801DA2u: // Reverb work area start: the position restarts there
+            rev_addr_ = (static_cast<u32>(val) * 8u) & 0x7FFFEu;
             break;
         case 0x1F801DA4u:
             irq_addr_reg_ = val;
@@ -328,6 +333,7 @@ void PsxSpu::key_on_voice(u32 v_idx) {
     v.hist1           = 0;
     v.hist2           = 0;
     v.prev_last       = 0;
+    v.prev_last2      = 0;
     v.adsr_vol        = 0;
     v.adsr_ticks      = 0;
     v.env_phase       = EnvPhase::Attack;
@@ -368,7 +374,8 @@ void PsxSpu::decode_adpcm_block(u32 v_idx) {
     const s32 f0 = ADPCM_POS_FILTER[filter];
     const s32 f1 = ADPCM_NEG_FILTER[filter];
 
-    v.prev_last = v.block_pcm[27];
+    v.prev_last2 = v.block_pcm[26];
+    v.prev_last  = v.block_pcm[27];
 
     for (u32 i = 0; i < 28u; ++i) {
         const u8 packed = ram_[base + 2u + (i >> 1)];
@@ -468,6 +475,8 @@ void PsxSpu::step_adsr(Voice& v) {
 void PsxSpu::mix_one_sample() {
     s32 mix_l = 0;
     s32 mix_r = 0;
+    s32 rev_in_l = 0, rev_in_r = 0;
+    const u32 eon = static_cast<u32>(regs_[0xCCu]) | (static_cast<u32>(regs_[0xCDu] & 0xFFu) << 16); // 1F801D98h
 
     const bool spu_enabled = (spucnt_ & 0x8000u) != 0;
     const bool unmuted     = (spucnt_ & 0x4000u) != 0;
@@ -484,7 +493,17 @@ void PsxSpu::mix_one_sample() {
             const s32 frac  = static_cast<s32>(v.phase_accum & 0xFFFu);
             const s32 s0    = (s_idx == 0) ? v.prev_last : v.block_pcm[s_idx - 1u];
             const s32 s1    = v.block_pcm[std::min<u32>(27u, s_idx)];
-            const s32 interp = s0 + (((s1 - s0) * frac) >> 12);
+            s32 interp = s0 + (((s1 - s0) * frac) >> 12);
+            if (cubic_) {
+                // Catmull-Rom through the two samples before and after the position
+                const s32 sm = (s_idx >= 2u) ? v.block_pcm[s_idx - 2u] : (s_idx == 1u ? v.prev_last : v.prev_last2);
+                const s32 s2 = v.block_pcm[std::min<u32>(27u, s_idx + 1u)];
+                const float t  = static_cast<float>(frac) * (1.0f / 4096.0f);
+                const float a0 = -0.5f * sm + 1.5f * s0 - 1.5f * s1 + 0.5f * s2;
+                const float a1 = static_cast<float>(sm) - 2.5f * s0 + 2.0f * s1 - 0.5f * s2;
+                const float a2 = -0.5f * sm + 0.5f * s1;
+                interp = clamp_s16(static_cast<s32>(((a0 * t + a1) * t + a2) * t + static_cast<float>(s0)));
+            }
 
             const s32 env_sample = (interp * v.adsr_vol) >> 15;
             const s32 vl         = decode_vol_reg(v.vol_left_reg);
@@ -492,6 +511,10 @@ void PsxSpu::mix_one_sample() {
 
             mix_l += (env_sample * vl) >> 15;
             mix_r += (env_sample * vr) >> 15;
+            if ((eon & (1u << i)) != 0) { // Voice sent to the reverb unit
+                rev_in_l += (env_sample * vl) >> 15;
+                rev_in_r += (env_sample * vr) >> 15;
+            }
 
             // Advance pitch counter (capped at 0x4000 = 4x 44.1 kHz per hardware spec)
             const u32 step = std::min<u32>(v.pitch, 0x4000u);
@@ -525,7 +548,24 @@ void PsxSpu::mix_one_sample() {
         if ((spucnt_ & 0x0001u) != 0) {
             mix_l += (cdl * static_cast<s32>(cd_vol_l_)) >> 15;
             mix_r += (cdr * static_cast<s32>(cd_vol_r_)) >> 15;
+            if ((spucnt_ & 0x0004u) != 0) { // CD audio sent to the reverb unit
+                rev_in_l += (cdl * static_cast<s32>(cd_vol_l_)) >> 15;
+                rev_in_r += (cdr * static_cast<s32>(cd_vol_r_)) >> 15;
+            }
         }
+    }
+
+    // Reverb: one step per two output samples (22.05 kHz), its output held in between
+    if (reverb_on_) {
+        rev_acc_l_ += rev_in_l;
+        rev_acc_r_ += rev_in_r;
+        if (rev_phase_) {
+            reverb_step(rev_acc_l_ / 2, rev_acc_r_ / 2);
+            rev_acc_l_ = rev_acc_r_ = 0;
+        }
+        rev_phase_ = !rev_phase_;
+        mix_l += (rev_out_l_ * static_cast<s32>(static_cast<s16>(regs_[0xC2u]))) >> 15; // vLOUT (1F801D84h)
+        mix_r += (rev_out_r_ * static_cast<s32>(static_cast<s16>(regs_[0xC3u]))) >> 15; // vROUT
     }
 
     if (!unmuted) {
@@ -548,6 +588,66 @@ void PsxSpu::mix_one_sample() {
     pcm_fifo_.push_back(out_l);
     pcm_fifo_.push_back(out_r);
     ++frames_rendered_;
+}
+
+// PS1 reverb (the formula documented in the PSX specifications): same-side and cross reflections
+// through a low-pass, four comb taps and two all-pass filters, all on delay lines in the sound RAM
+// work area [mBASE, 7FFFFh]. Register order from 1F801DC0h:
+//  0 dAPF1  1 dAPF2  2 vIIR  3 vCOMB1  4 vCOMB2  5 vCOMB3  6 vCOMB4  7 vWALL  8 vAPF1  9 vAPF2
+// 10 mLSAME 11 mRSAME 12 mLCOMB1 13 mRCOMB1 14 mLCOMB2 15 mRCOMB2 16 dLSAME 17 dRSAME
+// 18 mLDIFF 19 mRDIFF 20 mLCOMB3 21 mRCOMB3 22 mLCOMB4 23 mRCOMB4 24 dLDIFF 25 dRDIFF
+// 26 mLAPF1 27 mRAPF1 28 mLAPF2 29 mRAPF2 30 vLIN 31 vRIN
+void PsxSpu::reverb_step(s32 in_l, s32 in_r) {
+    const u32 base = (static_cast<u32>(regs_[0xD1u]) * 8u) & 0x7FFFEu; // mBASE (1F801DA2h)
+    const u32 size = 0x80000u - base;
+    if (base == 0u || size < 16u) return; // Work area not set up by the game yet
+    if (rev_addr_ < base) rev_addr_ = base;
+    const auto vol  = [&](u32 n) { return static_cast<s32>(static_cast<s16>(regs_[0xE0u + n])); };
+    const auto addr = [&](u32 n, s32 delta) {
+        const s64 rel = static_cast<s64>(rev_addr_ - base) + static_cast<s64>(regs_[0xE0u + n]) * 8 + delta;
+        return base + static_cast<u32>(((rel % size) + size) % size) & 0x7FFFEu;
+    };
+    const auto rd = [&](u32 n, s32 delta = 0) {
+        const u32 a = addr(n, delta);
+        return static_cast<s32>(static_cast<s16>(static_cast<u16>(ram_[a] | (ram_[a + 1u] << 8))));
+    };
+    const bool write_on = (spucnt_ & 0x0080u) != 0; // Master reverb enable: off = the unit only reads
+    const auto wr = [&](u32 n, s32 v) {
+        if (!write_on) return;
+        const u32 a = addr(n, 0);
+        const s16 s = clamp_s16(v);
+        ram_[a]      = static_cast<u8>(s & 0xFF);
+        ram_[a + 1u] = static_cast<u8>((static_cast<u16>(s) >> 8) & 0xFF);
+    };
+    const s32 lin = (clamp_s16(in_l) * vol(30)) >> 15, rin = (clamp_s16(in_r) * vol(31)) >> 15;
+    const s32 iir = vol(2), wall = vol(7);
+    // Reflections: same side (L->L, R->R) and other side (R->L, L->R), low-passed by vIIR
+    const auto reflect = [&](u32 m, u32 d, s32 in) {
+        const s32 old = rd(m, -2);
+        wr(m, ((((in + ((rd(d) * wall) >> 15)) - old) * iir) >> 15) + old);
+    };
+    reflect(10, 16, lin);
+    reflect(11, 17, rin);
+    reflect(18, 25, lin);
+    reflect(19, 24, rin);
+    // Early echo: four comb taps
+    s32 l = (vol(3) * rd(12) + vol(4) * rd(14) + vol(5) * rd(20) + vol(6) * rd(22)) >> 15;
+    s32 r = (vol(3) * rd(13) + vol(4) * rd(15) + vol(5) * rd(21) + vol(6) * rd(23)) >> 15;
+    // Late reverb: two all-pass filters
+    const auto allpass = [&](u32 m, u32 d_reg, u32 v_reg, s32& x) {
+        const s32 delayed = rd(m, -static_cast<s32>(regs_[0xE0u + d_reg]) * 8);
+        x = clamp_s16(x - ((vol(v_reg) * delayed) >> 15));
+        wr(m, x);
+        x = ((x * vol(v_reg)) >> 15) + delayed;
+    };
+    allpass(26, 0, 8, l);
+    allpass(27, 0, 8, r);
+    allpass(28, 1, 9, l);
+    allpass(29, 1, 9, r);
+    rev_out_l_ = clamp_s16(l);
+    rev_out_r_ = clamp_s16(r);
+    rev_addr_ += 2u;
+    if (rev_addr_ >= 0x80000u) rev_addr_ = base;
 }
 
 bool PsxSpu::tick(u64 elapsed_cycles) {

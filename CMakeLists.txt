@@ -18,6 +18,8 @@ add_library(vsport_core STATIC
     src/cdrom_iso.cpp
     src/psx_cdrom.cpp
     src/savestate.cpp
+    src/cheats.cpp
+    src/texture_replace.cpp
     src/psx_exe.cpp
     src/mips_decoder.cpp
     src/gte.cpp

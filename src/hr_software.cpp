@@ -2,6 +2,7 @@
 // N x resolution, in parallel horizontal bands (one per thread). Moved here unchanged from
 // psx_gpu.cpp; the result is identical to the previous built-in implementation.
 #include "vsport/hr_backend.hpp"
+#include "vsport/texture_replace.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -136,6 +137,36 @@ struct TexFetch {
     }
 };
 
+// Replacement texture (texture_replace.hpp) at texture position (su, sv): bilinear, weighted by
+// alpha so transparent pixels do not darken the edges; false = transparent (alpha below 50%)
+bool repl_sample(const HrPrim& p, double su, double sv, u32& r, u32& g, u32& b) noexcept {
+    const TexImage& im = *p.repl;
+    const float x = static_cast<float>((su - p.rep_u0) / p.rep_su) * static_cast<float>(im.w) - 0.5f;
+    const float y = static_cast<float>((sv - p.rep_v0) / p.rep_sv) * static_cast<float>(im.h) - 0.5f;
+    const float fx = std::floor(x), fy = std::floor(y);
+    const float ax = x - fx, ay = y - fy;
+    const s32 mx = static_cast<s32>(im.w) - 1, my = static_cast<s32>(im.h) - 1;
+    const s32 x0 = std::clamp(static_cast<s32>(fx), 0, mx), x1 = std::clamp(static_cast<s32>(fx) + 1, 0, mx);
+    const s32 y0 = std::clamp(static_cast<s32>(fy), 0, my), y1 = std::clamp(static_cast<s32>(fy) + 1, 0, my);
+    const u32 c[4] = {im.rgba[static_cast<std::size_t>(y0) * im.w + x0], im.rgba[static_cast<std::size_t>(y0) * im.w + x1],
+                      im.rgba[static_cast<std::size_t>(y1) * im.w + x0], im.rgba[static_cast<std::size_t>(y1) * im.w + x1]};
+    const float w[4] = {(1.0f - ax) * (1.0f - ay), ax * (1.0f - ay), (1.0f - ax) * ay, ax * ay};
+    float wa = 0.0f, sr = 0.0f, sg = 0.0f, sb = 0.0f;
+    for (int i = 0; i < 4; ++i) {
+        const float k = w[i] * static_cast<float>(c[i] >> 24);
+        wa += k;
+        sr += k * static_cast<float>(c[i] & 0xFFu);
+        sg += k * static_cast<float>((c[i] >> 8) & 0xFFu);
+        sb += k * static_cast<float>((c[i] >> 16) & 0xFFu);
+    }
+    if (wa < 127.5f) return false;
+    r = static_cast<u32>(sr / wa + 0.5f);
+    g = static_cast<u32>(sg / wa + 0.5f);
+    b = static_cast<u32>(sb / wa + 0.5f);
+    return true;
+}
+inline u16 rgb_to_555(u32 r, u32 g, u32 b) noexcept { return static_cast<u16>((r >> 3) | ((g >> 3) << 5) | ((b >> 3) << 10)); }
+
 s64 floor_div(s64 a, s64 b) noexcept { // b > 0
     return (a >= 0) ? a / b : -((-a + b - 1) / b);
 }
@@ -145,12 +176,17 @@ s64 floor_div(s64 a, s64 b) noexcept { // b > 0
 class SoftwareHrBackend final : public HrBackend {
 public:
     void set_scale(u32 scale, const u16* native_vram) override;
+    void clear_depth() override { std::fill(depth_.begin(), depth_.end(), 0.0f); }
     void set_options(const HrOptions& o) override { opt_ = o; tex_filter_ = o.texture_filter; persp_tex_ = o.perspective; }
     void draw(const std::vector<HrPrim>& batch, s32 native_y1, s32 native_y2, const u16* native_vram) override;
     void sync(u32 x, u32 y, u32 w, u32 h, const u16* native_vram) override;
     void copy(u32 sx, u32 sy, u32 dx, u32 dy, u32 w, u32 h) override;
     void clear() override { std::fill(hr_vram_.begin(), hr_vram_.end(), 0u); }
     const std::vector<u32>& picture() override { return hr_vram_; }
+    void snapshot(bool restore) override {
+        if (!restore) snap_ = hr_vram_;
+        else if (snap_.size() == hr_vram_.size()) std::copy(snap_.begin(), snap_.end(), hr_vram_.begin());
+    }
 
 private:
     using Vertex = GpuVertex;
@@ -158,6 +194,8 @@ private:
     void hr_draw_rect(const HrPrim& p, s32 band_y0, s32 band_y1, s32 band_x0 = 0, s32 band_x1 = 0x7FFFFFFF);
 
     std::vector<u32> hr_vram_;   // (1024*N) x (512*N), 0x00BBGGRR + bit 24 mask
+    std::vector<u32> snap_;      // Runahead copy of hr_vram_
+    std::vector<float> depth_;   // Depth buffer (1/z per pixel, 0 = nothing), only with opt_.depth_buffer
     u32 hr_scale_ = 1;
     const u16* vram_ = nullptr;  // Native VRAM of the batch being drawn (textures)
     HrOptions opt_;
@@ -194,6 +232,11 @@ void SoftwareHrBackend::sync(u32 x, u32 y, u32 w, u32 h, const u16* native_vram)
             for (u32 sy = 0; sy < s; ++sy) {
                 u32* row = &hr_vram_[static_cast<std::size_t>(ny * s + sy) * hw + nx * s];
                 for (u32 sx = 0; sx < s; ++sx) row[sx] = px;
+                if (!depth_.empty()) {
+                    // Filled / uploaded area: nothing 3D is there any more
+                    float* drow = &depth_[static_cast<std::size_t>(ny * s + sy) * hw + nx * s];
+                    for (u32 sx = 0; sx < s; ++sx) drow[sx] = 0.0f;
+                }
             }
         }
     }
@@ -220,6 +263,8 @@ void SoftwareHrBackend::copy(u32 sx, u32 sy, u32 dx, u32 dy, u32 w, u32 h) {
 void SoftwareHrBackend::draw(const std::vector<HrPrim>& hr_batch_, s32 batch_y1_, s32 batch_y2_, const u16* native_vram) {
     if (hr_batch_.empty() || hr_scale_ <= 1u || hr_vram_.empty()) return;
     vram_ = native_vram;
+    if (opt_.depth_buffer && depth_.size() != hr_vram_.size()) depth_.assign(hr_vram_.size(), 0.0f);
+    if (!opt_.depth_buffer && !depth_.empty()) { depth_.clear(); depth_.shrink_to_fit(); }
     const s32 s  = static_cast<s32>(hr_scale_);
     const s32 y0 = std::max(0, batch_y1_ * s);
     const s32 y1 = std::min(static_cast<s32>(VRAM_HEIGHT) * s - 1, (batch_y2_ + 1) * s - 1);
@@ -371,6 +416,17 @@ void SoftwareHrBackend::hr_draw_tri(const HrPrim& p, s32 band_y0, s32 band_y1) {
         if (vmax - vmin < 1.0) vmax = vmin + TEX_EPS * 2;
     }
 
+    // Depth buffer (optional): polygons whose three vertices have an exact depth are tested per
+    // pixel against what is already drawn (1/z, larger = nearer), so they hide each other
+    // correctly even when the game sorted them wrongly. Other polygons are drawn as always.
+    bool depth = opt_.depth_buffer && !depth_.empty();
+    for (int i = 0; i < 3 && depth; ++i) depth = v[i].exact && v[i].fz > 0.0f;
+    double zq[3]{}, dzq = 0;
+    if (depth) {
+        for (int i = 0; i < 3; ++i) zq[i] = 1.0 / static_cast<double>(v[i].fz);
+        dzq = ((zq[0] - zq[2]) * static_cast<double>(e[0].a) + (zq[1] - zq[2]) * static_cast<double>(e[1].a)) / static_cast<double>(area);
+    }
+
     for (s32 py = min_y; py <= max_y; ++py) {
         // Span of this row inside all three edges
         s64 x0 = min_x, x1 = max_x;
@@ -402,8 +458,11 @@ void SoftwareHrBackend::hr_draw_tri(const HrPrim& p, s32 band_y0, s32 band_y1) {
         const auto lin = [&](const double* a) { return a[2] + bd0 * (a[0] - a[2]) + bd1 * (a[1] - a[2]); };
         double cq = persp ? lin(q) : 0.0, cuq = persp ? lin(uq) : 0.0, cvq = persp ? lin(vq) : 0.0;
 
+        double czq = depth ? lin(zq) : 0.0;
+        float* drow = depth ? &depth_[static_cast<std::size_t>(py) * hw] : nullptr;
+
         u32* row = &hr_vram_[static_cast<std::size_t>(py) * hw];
-        for (s64 px = x0; px <= x1; ++px, r += dr, g += dg, bb += dbl, fu += du_d, fv += dv_d, cq += dq, cuq += duq, cvq += dvq) {
+        for (s64 px = x0; px <= x1; ++px, r += dr, g += dg, bb += dbl, fu += du_d, fv += dv_d, cq += dq, cuq += duq, cvq += dvq, czq += dzq) {
             u32 cr = v[0].r, cg = v[0].g, cb = v[0].b;
             if (shaded) {
                 cr = static_cast<u32>(std::clamp(r, 0.0, 255.0));
@@ -412,9 +471,11 @@ void SoftwareHrBackend::hr_draw_tri(const HrPrim& p, s32 band_y0, s32 band_y1) {
             }
             u32& dst = row[px];
             if (p.mcheck && (dst & HR_MASK) != 0) continue; // GP0(E6h) check mask
+            if (depth && static_cast<float>(czq) < drow[px] * 0.999f) continue; // Behind what is drawn
             if (!textured) {
                 cr = flat_ch(cr); cg = flat_ch(cg); cb = flat_ch(cb);
                 dst = (semi_trans ? blend_888(dst, cr, cg, cb, abr) : pack888(cr, cg, cb)) | set_mask;
+                if (depth && !semi_trans) drow[px] = static_cast<float>(czq);
                 continue;
             }
             // Texture position: perspective-correct when possible, else affine
@@ -425,7 +486,12 @@ void SoftwareHrBackend::hr_draw_tri(const HrPrim& p, s32 band_y0, s32 band_y1) {
             }
             u16 texel;
             u32 tr, tg, tb;
-            if (!filter) {
+            if (p.repl) {
+                // Replacement texture; the semi-transparency bit still comes from the game's texel
+                const u16 nt = tex.fetch(static_cast<u32>(static_cast<s32>(su)), static_cast<u32>(static_cast<s32>(sv)));
+                if (!repl_sample(p, su, sv, tr, tg, tb)) continue;
+                texel = static_cast<u16>(rgb_to_555(tr, tg, tb) | (nt & 0x8000u));
+            } else if (!filter) {
                 texel = tex.fetch(static_cast<u32>(static_cast<s32>(su)), static_cast<u32>(static_cast<s32>(sv)));
                 if (texel == 0) continue; // Transparent texel
                 tr = c5to8(texel & 0x1Fu); tg = c5to8((texel >> 5) & 0x1Fu); tb = c5to8((texel >> 10) & 0x1Fu);
@@ -435,7 +501,12 @@ void SoftwareHrBackend::hr_draw_tri(const HrPrim& p, s32 band_y0, s32 band_y1) {
                 // the blend so cut-out edges do not bleed black.
                 const float cu = static_cast<float>(su) - 0.5f, cv = static_cast<float>(sv) - 0.5f;
                 const float flu = std::floor(cu), flv = std::floor(cv);
-                const float ax = cu - flu, ay = cv - flv;
+                float ax = cu - flu, ay = cv - flv;
+                if (opt_.sharp_filter) {
+                    // Crisp texels: blend only in the middle third between two texel centres
+                    ax = std::clamp((ax - 0.5f) * 3.0f + 0.5f, 0.0f, 1.0f);
+                    ay = std::clamp((ay - 0.5f) * 3.0f + 0.5f, 0.0f, 1.0f);
+                }
                 const u32 iu = static_cast<u32>(static_cast<s32>(flu)), iv = static_cast<u32>(static_cast<s32>(flv));
                 const u16 t00 = tex.fetch(iu, iv), t10 = tex.fetch(iu + 1u, iv);
                 const u16 t01 = tex.fetch(iu, iv + 1u), t11 = tex.fetch(iu + 1u, iv + 1u);
@@ -469,6 +540,7 @@ void SoftwareHrBackend::hr_draw_tri(const HrPrim& p, s32 band_y0, s32 band_y1) {
                 out = mix(0) | mix(8) | mix(16);
             }
             dst = out | set_mask | ((texel & 0x8000u) != 0 ? HR_MASK : 0u);
+            if (depth && !(semi_trans && (texel & 0x8000u) != 0) && p.alpha >= 1.0f) drow[px] = static_cast<float>(czq);
         }
     }
 }
@@ -507,6 +579,13 @@ void SoftwareHrBackend::hr_draw_rect(const HrPrim& p, s32 band_y0, s32 band_y1, 
                     tr = sv & 0xFFu; tg = (sv >> 8) & 0xFFu; tb = (sv >> 16) & 0xFFu;
                     tsemi = (sv & HR_MASK) != 0;
                     t5 = static_cast<u16>((tr >> 3) | ((tg >> 3) << 5) | ((tb >> 3) << 10));
+                } else if (p.repl) {
+                    // Replacement texture, sampled at the upscaled pixel (more detail than the game's texels)
+                    const u16 nt = tex.fetch(static_cast<u32>(base_u + dx), static_cast<u32>(base_v + dy));
+                    const double su = base_u + (px + 0.5) / s - rx, sv = base_v + (py + 0.5) / s - ry;
+                    if (!repl_sample(p, su, sv, tr, tg, tb)) continue;
+                    tsemi = (nt & 0x8000u) != 0;
+                    t5 = rgb_to_555(tr, tg, tb);
                 } else {
                     const u16 texel = tex.fetch(static_cast<u32>(base_u + dx), static_cast<u32>(base_v + dy));
                     if (texel == 0) continue;

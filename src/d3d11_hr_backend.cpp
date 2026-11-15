@@ -7,6 +7,7 @@
 // blend states. Perspective-correct textures use u*q, v*q, q interpolated linearly; sprites that
 // texture from their own draw area are drawn in row strips through a copy of the picture.
 #include "vsport/d3d11_hr_backend.hpp"
+#include "vsport/texture_replace.hpp"
 
 #ifdef _WIN32
 #include <d3d11.h>
@@ -18,6 +19,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <unordered_map>
 
 namespace vsport {
 
@@ -35,6 +37,7 @@ cbuffer HrCB : register(b0) {
 
 Texture2D<uint> Vram : register(t0);    // Native 1024x512 VRAM (RGB555 + bit 15)
 Texture2D<float4> Self : register(t1);  // Copy of the upscaled picture (self-texturing sprites)
+Texture2D<float4> Repl : register(t2);  // Replacement texture of the current draw step (texture packs)
 
 struct VIn {
     float2 pos   : POSITION;   // Upscaled pixel position (+0.5, see the backend)
@@ -54,6 +57,7 @@ struct VIn {
     float3 puq   : TEXCOORD9;  // Perspective: u*q
     float3 pvq   : TEXCOORD10; // Perspective: v*q
     float4 box   : TEXCOORD11; // Perspective: u/v range of the triangle (umin, vmin, umax, vmax)
+    float4 rep   : TEXCOORD12; // Replacement texture: u0, v0, 1/width, 1/height in texels (see HrPrim)
 };
 struct VOut {
     float4 pos : SV_Position;
@@ -69,6 +73,7 @@ struct VOut {
     nointerpolation float3 puq : TEXCOORD9;
     nointerpolation float3 pvq : TEXCOORD10;
     nointerpolation float4 box : TEXCOORD11;
+    nointerpolation float4 rep : TEXCOORD12;
 };
 
 VOut VSMain(VIn i) {
@@ -89,6 +94,7 @@ VOut VSMain(VIn i) {
     o.puq   = i.puq;
     o.pvq   = i.pvq;
     o.box   = i.box;
+    o.rep   = i.rep;
     return o;
 }
 
@@ -121,7 +127,8 @@ uint flat_ch(uint c) { return c < 8u ? 0u : c; }
 
 static const uint FLAG_TEXTURED = 1u, FLAG_RECT = 2u, FLAG_FILTER = 4u, FLAG_SET_MASK = 8u, FLAG_SYNC = 16u;
 static const uint FLAG_STP_CLEAR_ONLY = 32u, FLAG_STP_SET_ONLY = 64u; // Semi-transparent polygon passes
-static const uint FLAG_PERSP = 128u, FLAG_SELF = 256u, FLAG_MASK_READ = 512u;
+static const uint FLAG_PERSP = 128u, FLAG_SELF = 256u, FLAG_MASK_READ = 512u, FLAG_FILTER_SHARP = 1024u;
+static const uint FLAG_REPL = 2048u;
 static const float TEX_EPS = 1.0f / 4096.0f; // Keeps exact integer coordinates from rounding down
 
 float plane(float3 a, float2 d) { return a.x + a.y * d.x + a.z * d.y; }
@@ -136,6 +143,26 @@ float2 tex_pos(VOut i) {
         }
     }
     return float2(plane(i.pu, d), plane(i.pv, d)) + TEX_EPS;
+}
+
+// Replacement texture at texture position st: bilinear, weighted by alpha so transparent pixels
+// do not darken the edges (as the software backend); false = transparent (alpha below 50%)
+bool repl_sample(float2 st, float4 rep, out uint3 t8) {
+    uint w, h;
+    Repl.GetDimensions(w, h);
+    const float2 p = (st - rep.xy) * rep.zw * float2(w, h) - 0.5f;
+    const float2 f = floor(p), a = p - f;
+    const int2 mx = int2(w, h) - 1;
+    const int2 i0 = clamp(int2(f), int2(0, 0), mx), i1 = clamp(int2(f) + 1, int2(0, 0), mx);
+    const float4 c00 = Repl.Load(int3(i0.x, i0.y, 0)), c10 = Repl.Load(int3(i1.x, i0.y, 0));
+    const float4 c01 = Repl.Load(int3(i0.x, i1.y, 0)), c11 = Repl.Load(int3(i1.x, i1.y, 0));
+    const float w00 = (1.0f - a.x) * (1.0f - a.y) * c00.a, w10 = a.x * (1.0f - a.y) * c10.a;
+    const float w01 = (1.0f - a.x) * a.y * c01.a,          w11 = a.x * a.y * c11.a;
+    const float wa = w00 + w10 + w01 + w11;
+    t8 = uint3(0u, 0u, 0u);
+    if (wa < 0.5f) return false;
+    t8 = uint3((w00 * c00.rgb + w10 * c10.rgb + w01 * c01.rgb + w11 * c11.rgb) / wa * 255.0f + 0.5f);
+    return true;
 }
 
 float4 PSMain(VOut i) : SV_Target {
@@ -175,6 +202,19 @@ float4 PSMain(VOut i) : SV_Target {
         transparent = (sc.r | sc.g | sc.b) == 0u && sc.a < 128u;
         t8 = sc.rgb;
         texel = (sc.r >> 3) | ((sc.g >> 3) << 5) | ((sc.b >> 3) << 10) | (sc.a >= 128u ? 0x8000u : 0u);
+    } else if ((i.tpwf.z & FLAG_REPL) != 0u) {
+        // Replacement texture (sprites: sampled at the upscaled pixel); the semi-transparency bit
+        // still comes from the game's texel
+        float2 st;
+        if ((i.tpwf.z & FLAG_RECT) != 0u) {
+            st = float2(float(i.rect.z) + (float(px) + 0.5f) / float(s) - float(i.rect.x),
+                        float(i.rect.w) + (float(py) + 0.5f) / float(s) - float(i.rect.y));
+        } else {
+            st = tex_pos(i);
+        }
+        const uint nt = fetch(uint(int(st.x)), uint(int(st.y)), i.tpwf.x, i.tpwf.y);
+        transparent = !repl_sample(st, i.rep, t8);
+        texel = (t8.r >> 3) | ((t8.g >> 3) << 5) | ((t8.b >> 3) << 10) | (nt & 0x8000u);
     } else if ((i.tpwf.z & FLAG_RECT) != 0u) {
         // Sprites keep their native texel grid
         const uint u = uint(i.rect.z + (px / s - i.rect.x)), v = uint(i.rect.w + (py / s - i.rect.y));
@@ -192,7 +232,12 @@ float4 PSMain(VOut i) : SV_Target {
         const float2 st = tex_pos(i);
         const float cu = st.x - 0.5f, cv = st.y - 0.5f;
         const float flu = floor(cu), flv = floor(cv);
-        const float ax = cu - flu, ay = cv - flv;
+        float ax = cu - flu, ay = cv - flv;
+        if ((i.tpwf.z & FLAG_FILTER_SHARP) != 0u) {
+            // Crisp texels: blend only in the middle third between two texel centres
+            ax = clamp((ax - 0.5f) * 3.0f + 0.5f, 0.0f, 1.0f);
+            ay = clamp((ay - 0.5f) * 3.0f + 0.5f, 0.0f, 1.0f);
+        }
         const uint iu = uint(int(flu)), iv = uint(int(flv));
         const uint t00 = fetch(iu, iv, i.tpwf.x, i.tpwf.y), t10 = fetch(iu + 1u, iv, i.tpwf.x, i.tpwf.y);
         const uint t01 = fetch(iu, iv + 1u, i.tpwf.x, i.tpwf.y), t11 = fetch(iu + 1u, iv + 1u, i.tpwf.x, i.tpwf.y);
@@ -235,11 +280,13 @@ struct HrVertex {
     s32 rect[4];
     float pu[3], pv[3], pq[3], puq[3], pvq[3]; // Texture planes (see the shader)
     float box[4];
+    float rep[4]; // Replacement texture mapping (see the shader)
 };
 
 constexpr u32 FLAG_TEXTURED = 1u, FLAG_RECT = 2u, FLAG_FILTER = 4u, FLAG_SET_MASK = 8u, FLAG_SYNC = 16u;
 constexpr u32 FLAG_STP_CLEAR_ONLY = 32u, FLAG_STP_SET_ONLY = 64u;
-constexpr u32 FLAG_PERSP = 128u, FLAG_SELF = 256u, FLAG_MASK_READ = 512u;
+constexpr u32 FLAG_PERSP = 128u, FLAG_SELF = 256u, FLAG_MASK_READ = 512u, FLAG_FILTER_SHARP = 1024u;
+constexpr u32 FLAG_REPL = 2048u;
 
 // How a run of vertices is blended into the picture
 enum BlendMode : u8 {
@@ -258,6 +305,7 @@ struct DrawCmd {
     bool check_mask = false;
     float factor = 0.0f;
     u32 copy_first = 0, copy_count = 0; // Picture -> temp_ copies done before this draw (copies_)
+    ID3D11ShaderResourceView* repl = nullptr; // Replacement texture (t2) of this step
 };
 
 struct alignas(16) HrConstants {
@@ -278,6 +326,10 @@ public:
     const std::vector<u32>& picture() override;
     void* gpu_device() override { return device_.Get(); }
     void* gpu_picture_view() override { return target_srv_.Get(); }
+    bool render_alternate(const std::vector<HrOp>& ops, const u16* native_vram) override;
+    void* gpu_alt_picture_view() override { return alt_srv_.Get(); }
+    const std::vector<u32>* alt_picture() override;
+    void snapshot(bool restore) override;
 
 private:
     bool create_targets();
@@ -292,11 +344,23 @@ private:
     // Emits a primitive with the right passes for its semi-transparency
     void emit_prim(const HrPrim& p, const HrVertex* v, u32 n);
     void flush_vertices();
+    void push_batch(const std::vector<HrPrim>& batch); // Queues a batch's vertices (no upload / flush)
+    // Picture drawn into: the main one, or the second one while render_alternate runs
+    ID3D11Texture2D* draw_tex() const { return alt_mode_ ? alt_.Get() : target_.Get(); }
+    void read_back(ID3D11Texture2D* tex, std::vector<u32>& out);
+    // Replacement texture of a primitive: sets FLAG_REPL and the mapping in proto, and cur_repl_
+    void set_replacement(const HrPrim& p, HrVertex& proto);
     void reset_lists() { verts_.clear(); cmds_.clear(); copies_.clear(); pending_copies_ = 0; }
 
     ComPtr<ID3D11Device> device_;
     ComPtr<ID3D11DeviceContext> ctx_;
     ComPtr<ID3D11Texture2D> target_, temp_, staging_;
+    ComPtr<ID3D11Texture2D> alt_;              // Second picture (frame interpolation)
+    ComPtr<ID3D11Texture2D> snap_;             // Runahead copy of the picture
+    ComPtr<ID3D11RenderTargetView> alt_rtv_;
+    ComPtr<ID3D11ShaderResourceView> alt_srv_;
+    bool alt_mode_ = false;
+    std::vector<u32> alt_picture_;
     ComPtr<ID3D11RenderTargetView> target_rtv_;
     ComPtr<ID3D11ShaderResourceView> target_srv_, temp_srv_;
     ComPtr<ID3D11Texture2D> vram_tex_;
@@ -315,6 +379,8 @@ private:
     u8 cur_blend_ = BLEND_OPAQUE; // Blend mode of the primitive being pushed (set by emit_prim)
     bool cur_check_ = false;
     float cur_factor_ = 0.0f;
+    ID3D11ShaderResourceView* cur_repl_ = nullptr; // Replacement texture of the primitive being pushed
+    std::unordered_map<const TexImage*, ComPtr<ID3D11ShaderResourceView>> repl_srvs_; // Uploaded replacements
     std::vector<u32> picture_;
     bool picture_dirty_ = true;
     u32 scale_ = 1;
@@ -373,6 +439,7 @@ bool D3D11HrBackend::init(ID3D11Device* shared, std::string* err) {
         {"TEXCOORD", 9, DXGI_FORMAT_R32G32B32_FLOAT, 0, offsetof(HrVertex, puq), D3D11_INPUT_PER_VERTEX_DATA, 0},
         {"TEXCOORD", 10, DXGI_FORMAT_R32G32B32_FLOAT, 0, offsetof(HrVertex, pvq), D3D11_INPUT_PER_VERTEX_DATA, 0},
         {"TEXCOORD", 11, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, offsetof(HrVertex, box), D3D11_INPUT_PER_VERTEX_DATA, 0},
+        {"TEXCOORD", 12, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, offsetof(HrVertex, rep), D3D11_INPUT_PER_VERTEX_DATA, 0},
     };
     if (FAILED(device_->CreateInputLayout(il, static_cast<UINT>(std::size(il)), vs_blob->GetBufferPointer(),
                                           vs_blob->GetBufferSize(), &layout_))) {
@@ -443,6 +510,10 @@ bool D3D11HrBackend::create_targets() {
     target_rtv_.Reset();
     target_srv_.Reset();
     target_.Reset();
+    alt_rtv_.Reset();
+    alt_srv_.Reset();
+    alt_.Reset();
+    snap_.Reset();
     temp_srv_.Reset();
     temp_.Reset();
     staging_.Reset();
@@ -477,6 +548,7 @@ void D3D11HrBackend::set_scale(u32 scale, const u16* native_vram) {
     picture_dirty_ = true;
     if (scale_ <= 1u) {
         target_rtv_.Reset(); target_srv_.Reset(); target_.Reset(); temp_srv_.Reset(); temp_.Reset(); staging_.Reset();
+        alt_rtv_.Reset(); alt_srv_.Reset(); alt_.Reset(); snap_.Reset();
         return;
     }
     if (!create_targets()) {
@@ -520,7 +592,7 @@ void D3D11HrBackend::begin_pass() {
     vp.Width    = 16384.0f;
     vp.Height   = 16384.0f;
     vp.MaxDepth = 1.0f;
-    ctx_->OMSetRenderTargets(1, target_rtv_.GetAddressOf(), nullptr);
+    ctx_->OMSetRenderTargets(1, alt_mode_ ? alt_rtv_.GetAddressOf() : target_rtv_.GetAddressOf(), nullptr);
     ctx_->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFFu);
     ctx_->OMSetDepthStencilState(nullptr, 0);
     ctx_->RSSetViewports(1, &vp);
@@ -557,10 +629,15 @@ void D3D11HrBackend::flush_vertices() {
     ctx_->Unmap(vbuffer_.Get(), 0);
     const UINT stride = sizeof(HrVertex), offset = 0;
     ctx_->IASetVertexBuffers(0, 1, vbuffer_.GetAddressOf(), &stride, &offset);
+    ID3D11ShaderResourceView* bound_repl = nullptr;
     for (const DrawCmd& c : cmds_) {
+        if (c.repl && c.repl != bound_repl) {
+            ctx_->PSSetShaderResources(2, 1, &c.repl);
+            bound_repl = c.repl;
+        }
         for (u32 k = 0; k < c.copy_count; ++k) {
             const D3D11_BOX& b = copies_[c.copy_first + k];
-            ctx_->CopySubresourceRegion(temp_.Get(), 0, b.left, b.top, 0, target_.Get(), 0, &b);
+            ctx_->CopySubresourceRegion(temp_.Get(), 0, b.left, b.top, 0, draw_tex(), 0, &b);
         }
         float f = 0.5f;                             // (B + F) / 2
         if (c.blend == BLEND_QUART) f = 0.25f;      // B + F / 4
@@ -606,13 +683,15 @@ void D3D11HrBackend::emit(const HrVertex* v, u32 n, u32 extra_flags, u8 blend, b
     // (never into or after a step that needs fresh copies: its copy holds only its own area)
     if (!cmds_.empty() && pending_copies_ == 0 && cmds_.back().copy_count == 0) {
         DrawCmd& last = cmds_.back();
-        if (last.blend == blend && last.check_mask == check_mask && last.factor == factor && last.start + last.count == start) {
+        if (last.blend == blend && last.check_mask == check_mask && last.factor == factor && last.repl == cur_repl_ &&
+            last.start + last.count == start) {
             last.count += n;
             return;
         }
     }
     DrawCmd c;
     c.start = start; c.count = n; c.blend = blend; c.check_mask = check_mask; c.factor = factor;
+    c.repl = cur_repl_;
     c.copy_first = static_cast<u32>(copies_.size()) - pending_copies_;
     c.copy_count = pending_copies_;
     pending_copies_ = 0;
@@ -666,6 +745,33 @@ void D3D11HrBackend::emit_prim(const HrPrim& p, const HrVertex* v, u32 n) {
     }
 }
 
+void D3D11HrBackend::set_replacement(const HrPrim& p, HrVertex& proto) {
+    cur_repl_ = nullptr;
+    if (!p.repl || !p.textured || p.repl->w == 0 || p.repl->h == 0) return;
+    auto it = repl_srvs_.find(p.repl);
+    if (it == repl_srvs_.end()) {
+        // First use: upload the image once (kept for the session, as the replacer keeps it)
+        D3D11_TEXTURE2D_DESC td{};
+        td.Width = p.repl->w; td.Height = p.repl->h; td.MipLevels = 1; td.ArraySize = 1;
+        td.Format = DXGI_FORMAT_R8G8B8A8_UNORM; td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_IMMUTABLE; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        D3D11_SUBRESOURCE_DATA init{};
+        init.pSysMem = p.repl->rgba.data();
+        init.SysMemPitch = p.repl->w * 4u;
+        ComPtr<ID3D11Texture2D> tex;
+        ComPtr<ID3D11ShaderResourceView> srv;
+        if (FAILED(device_->CreateTexture2D(&td, &init, &tex)) || FAILED(device_->CreateShaderResourceView(tex.Get(), nullptr, &srv))) {
+            srv.Reset(); // Remembered as failed: drawn with the game's texture
+        }
+        it = repl_srvs_.emplace(p.repl, srv).first;
+    }
+    if (!it->second) return;
+    cur_repl_ = it->second.Get();
+    proto.flags |= FLAG_REPL;
+    proto.rep[0] = p.rep_u0; proto.rep[1] = p.rep_v0;
+    proto.rep[2] = 1.0f / p.rep_su; proto.rep[3] = 1.0f / p.rep_sv;
+}
+
 void D3D11HrBackend::push_triangle(const HrPrim& p) {
     const s32 s = static_cast<s32>(scale_);
     const GpuVertex* v = p.v;
@@ -675,7 +781,7 @@ void D3D11HrBackend::push_triangle(const HrPrim& p) {
     HrVertex proto{};
     proto.tp    = static_cast<u32>(p.texpage) | (static_cast<u32>(p.clut) << 16);
     proto.win   = p.texwin;
-    proto.flags = (p.textured ? FLAG_TEXTURED : 0u) | ((p.textured && opt_.texture_filter) ? FLAG_FILTER : 0u) |
+    proto.flags = (p.textured ? FLAG_TEXTURED : 0u) | ((p.textured && opt_.texture_filter) ? (FLAG_FILTER | (opt_.sharp_filter ? FLAG_FILTER_SHARP : 0u)) : 0u) |
                   (p.mset ? FLAG_SET_MASK : 0u);
     proto.clip[0] = p.cx1 * s; proto.clip[1] = p.cy1 * s;
     proto.clip[2] = (p.cx2 + 1) * s - 1; proto.clip[3] = (p.cy2 + 1) * s - 1;
@@ -736,6 +842,7 @@ void D3D11HrBackend::push_triangle(const HrPrim& p) {
             proto.box[0] = umin; proto.box[1] = vmin; proto.box[2] = umax; proto.box[3] = vmax;
         }
     }
+    set_replacement(p, proto);
     HrVertex tri[3];
     for (int i = 0; i < 3; ++i) {
         HrVertex& o = tri[i];
@@ -744,6 +851,7 @@ void D3D11HrBackend::push_triangle(const HrPrim& p) {
         o.y = static_cast<float>(Y[i]) + 0.5f;
     }
     emit_prim(p, tri, 3);
+    cur_repl_ = nullptr;
 }
 
 void D3D11HrBackend::push_rect(const HrPrim& p) {
@@ -756,10 +864,12 @@ void D3D11HrBackend::push_rect(const HrPrim& p) {
     proto.clip[0] = p.cx1 * s; proto.clip[1] = p.cy1 * s;
     proto.clip[2] = (p.cx2 + 1) * s - 1; proto.clip[3] = (p.cy2 + 1) * s - 1;
     proto.rect[0] = p.rx; proto.rect[1] = p.ry; proto.rect[2] = p.bu; proto.rect[3] = p.bv;
+    set_replacement(p, proto);
     HrVertex q[6];
     make_quad(proto, static_cast<float>(p.rx * s), static_cast<float>(p.ry * s),
               static_cast<float>((p.rx + p.rw) * s), static_cast<float>((p.ry + p.rh) * s), q);
     emit_prim(p, q, 6);
+    cur_repl_ = nullptr;
 }
 
 void D3D11HrBackend::draw_self_rect(const HrPrim& p) {
@@ -815,7 +925,90 @@ void D3D11HrBackend::draw(const std::vector<HrPrim>& batch, s32, s32, const u16*
     if (batch.empty() || scale_ <= 1u || !target_rtv_) return;
     upload_vram(native_vram);
     begin_pass();
-    verts_.reserve(batch.size() * 6);
+    push_batch(batch);
+    flush_vertices();
+}
+
+bool D3D11HrBackend::render_alternate(const std::vector<HrOp>& ops, const u16* native_vram) {
+    if (scale_ <= 1u || !target_) return false;
+    if (!alt_) {
+        D3D11_TEXTURE2D_DESC td{};
+        target_->GetDesc(&td);
+        if (FAILED(device_->CreateTexture2D(&td, nullptr, &alt_)) ||
+            FAILED(device_->CreateRenderTargetView(alt_.Get(), nullptr, &alt_rtv_)) ||
+            FAILED(device_->CreateShaderResourceView(alt_.Get(), nullptr, &alt_srv_))) {
+            alt_.Reset(); alt_rtv_.Reset(); alt_srv_.Reset();
+            return false;
+        }
+    }
+    // Start from the finished picture (everything outside the redrawn frame stays as it is)
+    ctx_->CopyResource(alt_.Get(), target_.Get());
+    alt_mode_ = true;
+    upload_vram(native_vram);
+    begin_pass();
+    const s32 s = static_cast<s32>(scale_);
+    const auto c5to8 = [](u32 c) { return static_cast<float>((c * 527u + 23u) >> 6); };
+    for (const HrOp& op : ops) {
+        if (!op.fill) {
+            push_batch(op.prims);
+            continue;
+        }
+        // Fill (GP0 02h): flat colour, no mask bit; the rectangle is clamped to VRAM
+        const s32 x0 = std::clamp(op.x, 0, 1024), y0 = std::clamp(op.y, 0, 512);
+        const s32 x1 = std::clamp(op.x + op.w, 0, 1024), y1 = std::clamp(op.y + op.h, 0, 512);
+        if (x0 >= x1 || y0 >= y1) continue;
+        HrVertex proto{};
+        proto.pr[0] = c5to8(op.color & 31u); proto.pg[0] = c5to8((op.color >> 5) & 31u); proto.pb[0] = c5to8((op.color >> 10) & 31u);
+        proto.clip[0] = x0 * s; proto.clip[1] = y0 * s; proto.clip[2] = x1 * s - 1; proto.clip[3] = y1 * s - 1;
+        push_quad(proto, static_cast<float>(x0 * s), static_cast<float>(y0 * s), static_cast<float>(x1 * s), static_cast<float>(y1 * s));
+    }
+    flush_vertices();
+    alt_mode_ = false;
+    return true;
+}
+
+void D3D11HrBackend::read_back(ID3D11Texture2D* tex, std::vector<u32>& out) {
+    const u32 w = VRAM_WIDTH * scale_, h = VRAM_HEIGHT * scale_;
+    out.resize(static_cast<std::size_t>(w) * h);
+    ctx_->CopyResource(staging_.Get(), tex);
+    D3D11_MAPPED_SUBRESOURCE m{};
+    if (SUCCEEDED(ctx_->Map(staging_.Get(), 0, D3D11_MAP_READ, 0, &m))) {
+        for (u32 y = 0; y < h; ++y) {
+            const u32* src = reinterpret_cast<const u32*>(static_cast<const u8*>(m.pData) + static_cast<std::size_t>(y) * m.RowPitch);
+            u32* dst = &out[static_cast<std::size_t>(y) * w];
+            for (u32 x = 0; x < w; ++x) {
+                const u32 c = src[x]; // RGBA8 in memory = 0xAABBGGRR
+                dst[x] = (c & 0x00FFFFFFu) | ((c >> 24) >= 128u ? 0x01000000u : 0u);
+            }
+        }
+        ctx_->Unmap(staging_.Get(), 0);
+    }
+}
+
+void D3D11HrBackend::snapshot(bool restore) {
+    if (scale_ <= 1u || !target_) return;
+    if (!restore) {
+        if (!snap_) {
+            D3D11_TEXTURE2D_DESC td{};
+            target_->GetDesc(&td);
+            td.BindFlags = 0; // A plain copy target
+            if (FAILED(device_->CreateTexture2D(&td, nullptr, &snap_))) return;
+        }
+        ctx_->CopyResource(snap_.Get(), target_.Get());
+    } else if (snap_) {
+        ctx_->CopyResource(target_.Get(), snap_.Get());
+        picture_dirty_ = true;
+    }
+}
+
+const std::vector<u32>* D3D11HrBackend::alt_picture() {
+    if (scale_ <= 1u || !alt_) return nullptr;
+    read_back(alt_.Get(), alt_picture_);
+    return &alt_picture_;
+}
+
+void D3D11HrBackend::push_batch(const std::vector<HrPrim>& batch) {
+    verts_.reserve(verts_.size() + batch.size() * 6);
     for (const HrPrim& p : batch) {
         if (p.is_rect && p.self_tex && p.textured) {
             draw_self_rect(p);
@@ -837,7 +1030,6 @@ void D3D11HrBackend::draw(const std::vector<HrPrim>& batch, s32, s32, const u16*
             push_triangle(p);
         }
     }
-    flush_vertices();
 }
 
 void D3D11HrBackend::sync(u32 x, u32 y, u32 w, u32 h, const u16* native_vram) {
@@ -904,21 +1096,7 @@ const std::vector<u32>& D3D11HrBackend::picture() {
         return picture_;
     }
     if (!picture_dirty_) return picture_;
-    const u32 w = VRAM_WIDTH * scale_, h = VRAM_HEIGHT * scale_;
-    picture_.resize(static_cast<std::size_t>(w) * h);
-    ctx_->CopyResource(staging_.Get(), target_.Get());
-    D3D11_MAPPED_SUBRESOURCE m{};
-    if (SUCCEEDED(ctx_->Map(staging_.Get(), 0, D3D11_MAP_READ, 0, &m))) {
-        for (u32 y = 0; y < h; ++y) {
-            const u32* src = reinterpret_cast<const u32*>(static_cast<const u8*>(m.pData) + static_cast<std::size_t>(y) * m.RowPitch);
-            u32* dst = &picture_[static_cast<std::size_t>(y) * w];
-            for (u32 x = 0; x < w; ++x) {
-                const u32 c = src[x]; // RGBA8 in memory = 0xAABBGGRR
-                dst[x] = (c & 0x00FFFFFFu) | ((c >> 24) >= 128u ? 0x01000000u : 0u);
-            }
-        }
-        ctx_->Unmap(staging_.Get(), 0);
-    }
+    read_back(target_.Get(), picture_);
     picture_dirty_ = false;
     return picture_;
 }

@@ -1,4 +1,5 @@
 #include "vsport/cdrom_iso.hpp"
+#include "vsport/cheats.hpp"
 #include "vsport/d3d11_renderer.hpp"
 #include "vsport/pad_mapping.hpp"
 #include "vsport/psx_exe.hpp"
@@ -411,6 +412,7 @@ int main(int argc, char** argv) {
     int rim_mode = -1;         // --rim N (-1 = from settings / default)
     bool perf = false;         // --perf
     int gpu_hr = -1;           // --gpu-hr (1) / --cpu-hr (0); -1 = from settings (window) or CPU (headless)
+    std::filesystem::path cheats_path; // --cheats FILE
     std::filesystem::path save_state_path, load_state_path; // --save-state FILE N / --load-state FILE
     u32 save_state_vblank = 0, until_vblank = 0, break_every = 0;
     int overclock = -1;       // --overclock PERCENT (-1 = from settings / 100)
@@ -427,7 +429,15 @@ int main(int argc, char** argv) {
     u32 series_from  = 0;
     u64 max_cycles  = 2'000'000ull;
     u32 internal_scale = 0; // --scale N (0 = from settings / native)
-    bool texture_filter = false; // --texfilter
+    std::filesystem::path texdump_dir, texpack_dir; // --texdump DIR / --texpack DIR
+    int interp_flag = -1;                           // --interp 0/1: frame interpolation (-1 = from settings)
+    int runahead_flag = -1;                         // --runahead N: vblanks run ahead (-1 = from settings)
+    std::filesystem::path interp_dump_dir;          // --dump-interp DIR FROM: pictures around vblank FROM (headless)
+    u32 interp_dump_from = 0;
+    int reverb_flag = -1;   // --reverb 0/1 (-1 = from settings / on)
+    bool cubic_flag = false; // --cubic
+    bool depth_flag = false;
+    int texture_filter = -1; // --texfilter (1) / --texfilter-sharp (2); -1 = from settings / off
     // Scripted headless input: --press BUTTON@VBLANK[:FRAMES][,...] (e.g. START@560,CROSS@900:4)
     struct ScriptedPress { u16 bits; u32 at_vblank; u32 frames; };
     std::vector<ScriptedPress> presses;
@@ -471,7 +481,28 @@ int main(int argc, char** argv) {
         } else if (arg == "--scale" && i + 1 < argc) {
             internal_scale = static_cast<u32>(std::strtoul(argv[++i], nullptr, 10));
         } else if (arg == "--texfilter") {
-            texture_filter = true;
+            texture_filter = 1;
+        } else if (arg == "--runahead" && i + 1 < argc) {
+            runahead_flag = std::clamp(std::atoi(argv[++i]), 0, 3);
+        } else if (arg == "--interp" && i + 1 < argc) {
+            interp_flag = std::atoi(argv[++i]) != 0 ? 1 : 0;
+        } else if (arg == "--dump-interp" && i + 1 < argc) {
+            interp_dump_dir = argv[++i];
+            if (i + 1 < argc && argv[i + 1][0] >= '0' && argv[i + 1][0] <= '9') interp_dump_from = static_cast<u32>(std::atoi(argv[++i]));
+            std::error_code ec;
+            std::filesystem::create_directories(interp_dump_dir, ec);
+        } else if (arg == "--texdump" && i + 1 < argc) {
+            texdump_dir = argv[++i];
+        } else if (arg == "--texpack" && i + 1 < argc) {
+            texpack_dir = argv[++i];
+        } else if (arg == "--reverb" && i + 1 < argc) {
+            reverb_flag = std::atoi(argv[++i]) != 0 ? 1 : 0;
+        } else if (arg == "--cubic") {
+            cubic_flag = true;
+        } else if (arg == "--depth") {
+            depth_flag = true; // Experimental depth buffer (see PsxGpu::set_depth_buffer)
+        } else if (arg == "--texfilter-sharp") {
+            texture_filter = 2;
         } else if (arg == "--hidden") {
             hidden_window = true; // Tests: invisible window, no real input
         } else if (arg == "--no-throttle") {
@@ -494,6 +525,8 @@ int main(int argc, char** argv) {
         } else if (arg == "--save-state" && i + 2 < argc) {
             save_state_path   = argv[++i]; // Headless: save the machine state at VBlank N
             save_state_vblank = static_cast<u32>(std::strtoul(argv[++i], nullptr, 10));
+        } else if (arg == "--cheats" && i + 1 < argc) {
+            cheats_path = argv[++i]; // Cheat code file (see vsport/cheats.hpp)
         } else if (arg == "--load-state" && i + 1 < argc) {
             load_state_path = argv[++i];   // Headless: start from a saved state
         } else if (arg == "--until-vblank" && i + 1 < argc) {
@@ -649,6 +682,22 @@ int main(int argc, char** argv) {
     }
     rt.gpu().set_internal_scale(internal_scale);
     rt.set_cpu_overclock(static_cast<u32>(overclock >= 0 ? overclock : (use_settings ? settings.cpu_overclock : 100)));
+    // Cheat codes: --cheats FILE, or the file next to the exe when switched on in the settings
+    CheatList cheats;
+#ifdef _WIN32
+    if (cheats_path.empty() && use_settings && settings.cheats) cheats_path = launcher::cheats_path();
+#endif
+    if (!cheats_path.empty()) {
+        std::ifstream in(cheats_path, std::ios::binary);
+        const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        std::vector<std::string> problems;
+        cheats.parse(text, &problems);
+        std::printf("[vs_host] Hile kodlari: %zu hile acik (%zu tanimli)\n", cheats.enabled_count(), cheats.cheats().size());
+        for (const std::string& p : problems) std::printf("[vs_host] Hile dosyasi, %s\n", p.c_str());
+#ifdef _WIN32
+        host_log("Hile kodlari: %zu acik, %zu tanimli, %zu sorunlu satir", cheats.enabled_count(), cheats.cheats().size(), problems.size());
+#endif
+    }
     // Controller type: DualShock (vibration) unless switched off
     const bool rumble_on = rumble_flag >= 0 ? rumble_flag == 1 : (use_settings ? settings.rumble : false);
     rt.set_pad_dualshock(rumble_on);
@@ -672,7 +721,23 @@ int main(int argc, char** argv) {
     if (gpu_hr == 1 && headless && internal_scale > 1u) {
         use_gpu_hr(nullptr); // Headless: an own Direct3D 11 device
     }
-    rt.gpu().set_texture_filtering(texture_filter || (use_settings && settings.texture_filter));
+    if (texture_filter < 0) texture_filter = use_settings ? settings.texture_filter : 0;
+    rt.gpu().set_texture_filtering(texture_filter != 0);
+    rt.gpu().set_texture_filter_sharp(texture_filter == 2);
+    rt.gpu().set_depth_buffer(depth_flag);
+    rt.spu().set_reverb_enabled(reverb_flag >= 0 ? reverb_flag == 1 : (use_settings ? settings.reverb : true));
+    rt.spu().set_cubic_interpolation(cubic_flag || (use_settings && settings.audio_cubic));
+    TextureReplacer texrep;
+    if (texpack_dir.empty() && use_settings && settings.texture_pack) texpack_dir = launcher::texture_pack_dir();
+    if (texdump_dir.empty() && use_settings && settings.texture_dump) texdump_dir = launcher::texture_pack_dir() / "_dokum";
+    if (!texpack_dir.empty()) {
+        const std::size_t n = texrep.scan(texpack_dir);
+        std::printf("[vs_host] Doku paketi: %zu degistirme dokusu (%s)\n", n, texpack_dir.string().c_str());
+        if (n) host_log("Doku paketi: %zu degistirme dokusu", n);
+    }
+    if (!texdump_dir.empty()) texrep.set_dump_dir(texdump_dir);
+    if (texrep.active()) rt.gpu().set_texture_replacer(&texrep);
+    rt.gpu().set_frame_interpolation(interp_flag >= 0 ? interp_flag == 1 : (use_settings && settings.frame_interp));
     if (pgxp_mode < 0) pgxp_mode = use_settings ? settings.pgxp : 2;
     rt.pgxp().set_enabled(pgxp_mode > 0 && rt.gpu().internal_scale() > 1u);
     rt.gpu().set_perspective_textures(pgxp_mode >= 2);
@@ -754,10 +819,31 @@ int main(int argc, char** argv) {
                 const bool ok = rt.load_state(std::move(data), ctx);
                 std::printf("[vs_host] Durum yukleme: %s (kare %u)\n", ok ? "tamam" : "HATA", rt.vblank_count());
             }
+            // --dump-wav in headless mode records the whole run (the SPU itself keeps only ~60 ms)
+            std::vector<s16> wav_all;
+            const bool record_wav = !dump_wav_path.empty();
             {
-                rt.set_vblank_callback([&rt, &ctx, &presses, auto_start, &series_dir, series_every, series_from, perf, rumble_flag,
-                                        save_state_vblank, until_vblank, break_every, &save_pending]() {
+                rt.set_vblank_callback([&rt, &ctx, &presses, auto_start, &series_dir, series_every, series_from, perf, rumble_flag, &cheats,
+                                        save_state_vblank, until_vblank, break_every, &save_pending, record_wav, &wav_all,
+                                        &interp_dump_dir, interp_dump_from]() {
                     const u32 vb = rt.vblank_count();
+                    if (!interp_dump_dir.empty() && vb >= interp_dump_from && vb < interp_dump_from + 40u) {
+                        // Diagnostics: what would be presented at each vblank (m = main, i = in-between)
+                        char name[32];
+                        rt.gpu().flush_hr();
+                        if (rt.gpu().showing_interpolated()) {
+                            std::snprintf(name, sizeof(name), "v%06u_i.ppm", vb);
+                            rt.gpu().dump_interpolated_ppm(interp_dump_dir / name);
+                        } else {
+                            std::snprintf(name, sizeof(name), "v%06u_m.ppm", vb);
+                            rt.gpu().dump_ppm(interp_dump_dir / name, false);
+                        }
+                    }
+                    if (record_wav) {
+                        std::vector<s16> chunk;
+                        rt.spu().pop_samples(chunk, 1u << 20);
+                        wav_all.insert(wav_all.end(), chunk.begin(), chunk.end());
+                    }
                     if (save_state_vblank != 0 && vb == save_state_vblank) {
                         save_pending = true;
                         rt.request_break();
@@ -788,6 +874,7 @@ int main(int argc, char** argv) {
                         if (vb >= p.at_vblank && vb < p.at_vblank + p.frames) pressed |= p.bits;
                     }
                     rt.set_pad_buttons(static_cast<u16>(~pressed));
+                    cheats.apply(rt);
                     if (rumble_flag == 1) { // Diagnostics: print vibration changes
                         static int last = -1;
                         const int now_v = (rt.pad_motor_small() ? 256 : 0) | rt.pad_motor_large();
@@ -838,6 +925,31 @@ int main(int argc, char** argv) {
             }
             if (!rt.cdrom().debug_log().empty()) {
                 std::printf("--- CD-ROM Komut Gunlugu ---\n%s", rt.cdrom().debug_log().c_str());
+            }
+            if (rt.gpu().frame_interpolation()) {
+                std::printf("[vs_host] Ara kare: %llu gosterildi, %llu atlandi\n", static_cast<unsigned long long>(rt.gpu().interp_shown()),
+                            static_cast<unsigned long long>(rt.gpu().interp_skipped()));
+            }
+            if (texrep.active()) {
+                std::printf("[vs_host] Doku degistirme: %llu dokulu primitif, %llu tek yuklemede (%%%.1f), %llu arama, %llu isabet, %llu dokum, %zu kayitli yukleme\n",
+                            static_cast<unsigned long long>(rt.gpu().repl_considered()), static_cast<unsigned long long>(rt.gpu().repl_in_upload()),
+                            rt.gpu().repl_considered() ? 100.0 * static_cast<double>(rt.gpu().repl_in_upload()) / static_cast<double>(rt.gpu().repl_considered()) : 0.0,
+                            static_cast<unsigned long long>(texrep.stats.lookups), static_cast<unsigned long long>(texrep.stats.hits),
+                            static_cast<unsigned long long>(texrep.stats.dumped), rt.gpu().upload_count());
+            }
+            if (record_wav) {
+                std::vector<s16> chunk;
+                rt.spu().pop_samples(chunk, 1u << 20);
+                wav_all.insert(wav_all.end(), chunk.begin(), chunk.end());
+                std::ofstream out(dump_wav_path, std::ios::binary);
+                const u32 bytes = static_cast<u32>(wav_all.size() * sizeof(s16));
+                const u32 hdr[] = {0x46464952u, 36u + bytes, 0x45564157u, 0x20746D66u, 16u, 0x00020001u, 44100u, 44100u * 4u, 0x00100004u,
+                                   0x61746164u, bytes};
+                out.write(reinterpret_cast<const char*>(hdr), sizeof(hdr));
+                out.write(reinterpret_cast<const char*>(wav_all.data()), static_cast<std::streamsize>(bytes));
+                std::printf("[vs_host] Tum oturumun sesi (%.1f s) WAV olarak yazildi: %s\n", wav_all.size() / 2.0 / 44100.0,
+                            dump_wav_path.string().c_str());
+                dump_wav_path.clear();
             }
         }
 
@@ -919,6 +1031,10 @@ int main(int argc, char** argv) {
             }
             // Default: graphics card (settings "renderer" 0); --gpu-hr / --cpu-hr override
             const bool want_gpu = gpu_hr == 1 || (gpu_hr < 0 && (!use_settings || settings.renderer == 0));
+            if (!want_gpu && rt.gpu().internal_scale() > 6u) {
+                rt.gpu().set_internal_scale(6); // 7x / 8x are far too slow on the processor
+                host_log("Islemci cizimi: ic cozunurluk 6x ile sinirlandi");
+            }
             if (want_gpu && rt.gpu().internal_scale() > 1u) {
                 use_gpu_hr(d3d.device_handle()); // Shares the window's device: no CPU copy per frame
             }
@@ -986,6 +1102,18 @@ int main(int argc, char** argv) {
         }
     };
 
+    // Runahead: after each real vblank (input, sound) the state is saved, N vblanks are run ahead
+    // with the same input and the last one is shown, then the saved state is loaded back. The
+    // game answers a button N vblanks sooner; it costs N extra emulated vblanks per vblank.
+    const int runahead = runahead_flag >= 0 ? runahead_flag : (use_settings ? std::clamp(settings.runahead, 0, 3) : 0);
+    int ra_phase = 0;          // 0 = real vblank next, 1..runahead = vblanks ahead
+    u32 ra_real_vb = 0;        // Vblank count of the real timeline (what is shown is ra_real_vb + runahead)
+    std::vector<u8> ra_state;  // State after the last real vblank
+    if (runahead > 0) {
+        rt.gpu().set_frame_interpolation(false); // Both re-show frames: not together
+        host_log("Gecikme azaltma: %d kare ileri", runahead);
+    }
+
     // Save states: files next to the memory card (slot 0 = automatic "continue" state)
     const bool autosave_on = use_settings && settings.autosave && !hidden_window;
     const bool rewind_on   = use_settings ? settings.rewind : false;
@@ -1035,6 +1163,14 @@ int main(int argc, char** argv) {
             DispatchMessageA(&msg);
         }
         if (!running) return;
+        cheats.apply(rt);
+        if (runahead > 0) {
+            rt.request_break(); // The main loop takes over after every vblank (see runahead above)
+            if (ra_phase > 0 && ra_phase < runahead) return; // Silent vblank ahead
+        }
+        const bool ra_show = runahead > 0 && ra_phase == runahead; // Last vblank ahead: only shown
+        if (!ra_show) {
+        if (runahead > 0) ra_real_vb = rt.vblank_count();
 
         // Title notice expired -> normal title
         if (!host_state.notice.empty() && GetTickCount64() >= host_state.notice_until) {
@@ -1071,14 +1207,19 @@ int main(int argc, char** argv) {
             }
         }
         rt.set_pad_buttons(static_cast<u16>(~pressed));
+        cheats.apply(rt);
         if (rumble_on && !hidden_window) gamepad.set_rumble(rt.pad_motor_small(), rt.pad_motor_large());
 
-        // Stream synthesized PS1 SPU 44.1 kHz Stereo PCM to Windows audio ring buffer
-        audio.pump_from_spu(rt.spu());
+        // Stream synthesized PS1 SPU 44.1 kHz Stereo PCM to Windows audio ring buffer (runahead:
+        // the main loop takes the sound of the real vblank only)
+        if (runahead == 0) audio.pump_from_spu(rt.spu());
+        if (runahead > 0) return; // Real vblank: shown after running ahead
+        } // !ra_show
 
         host_state.apply_gte_widening(hwnd); // Follows window resizes in "fill" mode
         if (d3d.is_initialized()) {
-            const bool dump_now = !window_dump_path.empty() && rt.vblank_count() >= window_dump_frame;
+            const u32 shown_vb = runahead > 0 ? ra_real_vb : rt.vblank_count(); // Runahead: count of the real timeline
+            const bool dump_now = !window_dump_path.empty() && shown_vb >= window_dump_frame;
             if (dump_now) d3d.request_backbuffer_dump(window_dump_path);
             // No vsync: pacing comes from throttle_frame(), not the monitor's refresh rate
             d3d.present_vram(rt.gpu(), host_state.show_full_vram,
@@ -1137,6 +1278,27 @@ int main(int argc, char** argv) {
         while (!ctx.halted) {
             rt.run(ctx, 0x00FF'FFFF'FFFF'FFFFull);
             if (ctx.halted) break;
+            if (runahead > 0 && running) {
+                if (ra_phase == 0) {
+                    // A real vblank has run: take its sound, remember this point, then run ahead
+                    audio.pump_from_spu(rt.spu());
+                    ra_state = rt.save_state(ctx);
+                    rt.runahead_snapshot(false);
+                    ra_phase = 1;
+                    continue;
+                }
+                if (ra_phase < runahead) {
+                    ++ra_phase;
+                    continue;
+                }
+            }
+            if (runahead > 0 && ra_phase > 0) {
+                // The last vblank ahead has been shown (or quitting): back to the real timeline,
+                // where save states, rewind and quitting below happen
+                if (!rt.load_state_fast(ra_state, ctx)) host_log("Gecikme azaltma: durum geri yuklenemedi");
+                rt.runahead_snapshot(true);
+                ra_phase = 0;
+            }
             if (!running) {
                 // Quitting, stopped at a clean point: keep the state for "continue where you left off"
                 if (autosave_on) save_state_file(state_file(0), "Otomatik kayit");

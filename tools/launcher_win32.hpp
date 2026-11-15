@@ -38,7 +38,7 @@ struct GameSettings {
     int  internal_scale = 2;      // Rendering resolution: 1 = native 320x240, 2..6 = N x
     int  renderer       = 0;      // Upscaled picture drawn by: 0 = graphics card (Direct3D 11), 1 = processor
     std::string gpu;              // Graphics card name (UTF-8); empty = automatic (the most powerful one)
-    bool texture_filter = false;  // Bilinear filtering of 3D textures (needs internal_scale >= 2)
+    int  texture_filter = 0;      // 3D texture filter (internal_scale >= 2): 0 = off, 1 = bilinear, 2 = sharp bilinear
     int  rim_light      = 0;      // Character rim light: 0 = soft, 1 = sharp, 2 = off
     int  pgxp           = 2;      // Vertex precision (internal res >= 2): 0 = off, 1 = no wobble, 2 = + perspective textures
     int  filter         = 0;      // 0 = sharp pixel, 1 = smooth bilinear, 2 = CRT
@@ -47,6 +47,13 @@ struct GameSettings {
     bool muted          = false;
     int  volume         = 100;    // 0..100
     int  cpu_overclock  = 100;    // Emulated CPU speed in percent (100 = original)
+    bool reverb         = true;   // PS1 reverb unit (echo)
+    bool audio_cubic    = false;  // Cubic instead of linear sample interpolation
+    bool cheats         = false;  // Apply the cheat codes in cheats_path()
+    int  runahead       = 0;      // Input lag reduction: vblanks run ahead (0..3)
+    bool frame_interp   = false;  // Frame interpolation: in-between pictures, 25 -> 50 fps (graphics card renderer)
+    bool texture_pack   = true;   // Use replacement textures from texture_pack_dir() (if any)
+    bool texture_dump   = false;  // Dump the game's textures (for making packs)
     bool autosave       = false;  // Save the machine state on exit and continue from it on the next start
     bool rewind         = false;  // Keep ~30 s of states in memory; hold F8 to rewind
     bool rumble         = true;   // DualShock vibration (XInput controllers)
@@ -55,6 +62,9 @@ struct GameSettings {
 };
 
 [[nodiscard]] std::filesystem::path settings_path();  // VagrantStory.ini next to the exe
+[[nodiscard]] std::filesystem::path cheats_path();    // VagrantStory_hileler.txt next to the exe
+// Texture pack folder next to the exe ("dokular"); dumps go to its "_dokum" subfolder
+[[nodiscard]] std::filesystem::path texture_pack_dir();
 [[nodiscard]] std::filesystem::path default_memcard_path(); // saves\VagrantStory_kart1.mcr next to the exe
 [[nodiscard]] GameSettings load_settings(const std::filesystem::path& ini);
 void save_settings(const std::filesystem::path& ini, const GameSettings& s);

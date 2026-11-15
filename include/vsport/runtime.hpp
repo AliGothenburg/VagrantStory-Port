@@ -148,8 +148,17 @@ public:
     // are not part of it. Only call between run() calls (see request_break).
     [[nodiscard]] std::vector<u8> save_state(const CpuContext& ctx);
     [[nodiscard]] bool load_state(std::vector<u8> data, CpuContext& ctx);
+    // Runahead: back to a state saved a few vblanks ago by save_state, in the same session. The
+    // host-side drawing state is kept (upscaled picture: see PsxGpu::picture_snapshot, exact
+    // vertex cache, no backup copy). The state must be valid (made by save_state).
+    bool load_state_fast(const std::vector<u8>& data, CpuContext& ctx);
+    // Runahead: host-side drawing state kept with save_state and put back after load_state_fast
+    // (upscaled picture, rim-light estimate, exact vertex cache), so what is shown does not depend
+    // on how often a frame was run
+    void runahead_snapshot(bool restore);
     // Makes run() return as soon as the CPU is outside an interrupt handler (from the VBlank callback)
     void request_break() noexcept { break_requested_ = true; }
+    bool fast_load_ = false; // load_state_fast in progress
     void serialize_state(StateIO& io, CpuContext& ctx);
 
 private:
@@ -209,6 +218,7 @@ private:
     std::vector<u8> bios_;
 
     PgxpCache pgxp_; // Exact vertex positions (GTE -> GPU), upscaled picture only
+    PgxpCache pgxp_snap_; // Runahead copy of pgxp_
     GteEngine gte_;
     PsxGpu gpu_;
     PsxCdrom cdrom_;

@@ -42,6 +42,11 @@ public:
     // Exports buffered stereo audio to a 16-bit 44.1 kHz RIFF WAV file
     bool dump_wav(const std::filesystem::path& path) const;
 
+    // Reverb unit (echo of rooms and halls, as on hardware); off = dry sound
+    void set_reverb_enabled(bool on) noexcept { reverb_on_ = on; }
+    // Sample interpolation of the voices: false = linear, true = cubic (cleaner highs)
+    void set_cubic_interpolation(bool on) noexcept { cubic_ = on; }
+
     // Diagnostics & telemetry
     [[nodiscard]] u64 bytes_uploaded() const noexcept { return bytes_uploaded_; }
     [[nodiscard]] u64 key_on_count() const noexcept { return key_on_events_; }
@@ -82,6 +87,7 @@ private:
         s32 hist2           = 0;
         u8  block_flags     = 0;
         s16 prev_last       = 0;
+        s16 prev_last2      = 0; // Sample before prev_last (cubic interpolation)
         std::array<s16, 28> block_pcm{};
     };
 
@@ -116,6 +122,15 @@ private:
     s32 xa_hist_r1_    = 0;
     s32 xa_hist_r2_    = 0;
     std::deque<s16> cd_audio_fifo_;
+
+    // Reverb: runs at 22.05 kHz on a work area at the top of the sound RAM
+    void reverb_step(s32 in_l, s32 in_r);
+    bool reverb_on_   = true;
+    bool cubic_       = false;
+    u32 rev_addr_     = 0;     // Current position in the work area (byte address)
+    bool rev_phase_   = false; // Second of the two 44.1 kHz samples per reverb step
+    s32 rev_acc_l_    = 0, rev_acc_r_ = 0; // Input summed over the two samples
+    s32 rev_out_l_    = 0, rev_out_r_ = 0; // Last reverb output
 
     u64 cycle_accum_        = 0;
     u64 bytes_uploaded_     = 0;

@@ -53,14 +53,16 @@ tıklamak yeterlidir (konsol penceresi açılmaz):
     değeriyle yapılır (köşelerin ~%90'ı); aynı piksele düşen birden fazla nokta varsa o köşe
     orijinal konumunda kalır. Oyunun kendisi ve orijinal (1×) görüntü değişmez.
   - **3D sahneyi orana göre genişlet:** açıksa geniş oranlarda 3D sahne esnetilmez, yanlara
-    doğru daha fazlası görünür (oyunun ekran dışı kabul edip çizmediği kenarlarda boşluk
-    olabilir; 10:7 ya da 3:2 gibi ara oranlarda bu boşluklar çok daha azdır). Kapalıysa görüntü
-    seçilen orana esnetilir, hiç boşluk kalmaz.
+    doğru daha fazlası görünür (denenen sahnelerde kenarlarda boşluk görülmedi; 2D yazılar ve
+    göstergeler ise yatayda esner). Kapalıysa görüntü seçilen orana esnetilir.
   - Pencere kipinde pencere seçilen oranı korur (kenarından sürükleyince ve F3 ile oran
     değiştirince), bu yüzden etrafta siyah bant kalmaz. Tam ekranda ekranınızın oranını seçin
     (ör. 16:9 monitörde 16:9) ya da "doldur"u kullanın. Tam sayı ölçekleme yalnızca 1× iç
     çözünürlükte uygulanır.
-  - **Ses:** sesi kapatma ve ses seviyesi.
+  - **Ses:** sesi kapatma, ses seviyesi, **yankı** (PS1'in reverb birimi; oyun mekân ve zindan
+    yankısı için yoğun kullanır, varsayılan açık) ve **kübik ara değerleme** (örnekler arasında
+    doğrusal yerine kübik geçiş; tizler biraz daha temiz, varsayılan kapalı, gerçek PS1 doğrusala
+    yakındır). Komut satırı: `--reverb 0/1`, `--cubic`.
   - **Titreşim:** oyun DualShock titreşimini kullanır; Xbox / XInput uyumlu kontrolcülerde çalışır
     (Kontroller sayfasından kapatılabilir; DirectInput kontrolcülerde henüz yok).
   - **Anlık kayıt:** oyunun kayıt noktalarından bağımsız olarak **F5** kaydeder, **F7** yükler, **F6** kayıt
@@ -68,6 +70,47 @@ tıklamak yeterlidir (konsol penceresi açılmaz):
     anlık kayda dahil değildir: bir durumu yüklemek kartta yapılmış kayıtları geri almaz.
     Gelişmiş sayfasında iki seçenek daha var: **çıkarken durumu kaydedip açılışta kaldığın yerden devam**
     ve **geri sarma** (F8 basılı tutulunca son ~30 saniye; ~110 MB bellek).
+  - **Hile kodları:** Gelişmiş sayfasından açılır. Kodlar exe'nin yanındaki `VagrantStory_hileler.txt`
+    dosyasına GameShark / Action Replay biçiminde yazılır (`[Hile adı]` satırı, altında `80012345 03E7`
+    gibi kodlar; `[Ad] off` kapalı hile). Desteklenen türler: 80, 30, D0–D3, E0–E3. Kodlar oyunun
+    sürümüne özeldir (Avrupa sürümü: SLES-02754). "Hile dosyasını aç…" dosyayı açıklamasıyla oluşturur.
+  - **Ara kare üretimi (Grafik sayfası, deneysel):** oyun 2 vblank'te bir yeni kare gösterir
+    (25 fps). Açıkken her yeni karenin öncesinde, her poligonu önceki ve yeni karedeki yerinin tam
+    ortasında çizen bir ara kare gösterilir; görüntü 50 fps akar. Oyunun kendisi değişmez (oyun
+    mantığı 25 fps çalışmaya devam eder). Bunun bedeli, yeni karenin 1 vblank (20 ms) geç
+    görünmesidir. Sahne değişimlerinde, oyunun yavaşladığı anlarda, videolarda ve iki kare
+    arasında bulunamayan ya da çok uzağa sıçrayan poligonlarda ara kare yapılmaz; o poligonlar
+    yeni karedeki yerinde çizilir. Yazılar ve göstergeler (sprite'lar) yerinde kalır. Yalnızca
+    ekran kartı çiziminde ve 2× ve üstü iç çözünürlükte çalışır. Komut satırı: `--interp 0/1`.
+  - **Doku paketleri:** exe'nin yanındaki `dokular` klasörüne konan PNG'ler oyunun dokularının yerine
+    çizilir (2× ve üstü iç çözünürlükte, iki çizim yolunda da; oyunun kendisi ve 1× görüntü değişmez).
+    Paket hazırlamak için Gelişmiş sayfasında "Oyunun dokularını dök" açılır: oyun bir dokuyu her
+    çizdiğinde, daha önce dökülmemişse `dokular\_dokum` klasörüne
+    `<yükleme özeti>-<palet özeti>-<renk derinliği>.png` adıyla yazılır. Görüntü, oyunun VRAM'e bir
+    seferde yüklediği alanın tamamıdır, o paletle çizilmiş haliyle; saydam pikseller alfa 0'dır.
+    Büyütülmüş ya da yeniden çizilmiş hali **aynı adla** `dokular` klasörüne (alt klasörler olur; `_`
+    ile başlayan klasörler okunmaz) konunca kullanılır. Boyut serbesttir (genelde 2×–8×). Çizilirken
+    bilinear süzülür; alfası %50'nin altındaki pikseller saydamdır. Yarı saydamlık oyunun kendi doku
+    pikselinden gelir. Ad, dosya adının başındaki bu üç parçadır; arkasına `-kılıç` gibi bir not
+    eklenebilir. Bilinen sınırlar: oyun dokunun paletini değiştirdiğinde (renk geçişleri) o anda
+    paketteki doku kullanılmaz. Doku penceresi (E2) kullanan çizimler ve birden fazla yüklemeye
+    yayılan dokular da değiştirilemez. Paket her açılışta yeniden okunur. Komut satırı:
+    `--texpack KLASÖR`, `--texdump KLASÖR`.
+  - **Gecikme azaltma (runahead, Gelişmiş sayfası):** her vblank'te gerçek kare çalıştırılır (tuşlar,
+    ses) ve durumu saklanır. Ardından 1–3 kare ileri çalıştırılıp sonuncusu gösterilir, sonra
+    saklanan duruma dönülür. Tuşa basışın sonucu seçilen kare sayısı kadar (20–60 ms) erken görünür.
+    Gösterilen kare, normal çalışmanın o kadar sonraki karesiyle piksel piksel aynıdır. Emülasyon
+    kare başına 2–4 kat çalışır. Ryzen 9 8945HS + RTX 4060' ta 4× oynanışta saniyede 1 karede 72,
+    2 karede 50 gerçek kare (gereken 50) ölçüldü: 1 kare önerilir, 2–3 kare ağır sahnelerde oyunu
+    yavaşlatabilir. Açıkken ara kare üretimi kapanır.
+    F5/F7, geri sarma ve çıkışta kayıt gerçek zaman çizgisinde çalışır. Komut satırı: `--runahead N`.
+  - **Videoları geçme:** oyun açılış videosunu START ile kendisi geçirir; diğer sahnelerde **Tab** hızlı ileri sarar.
+  - **Kenar yumuşatma (süper örnekleme):** iç çözünürlük pencereden büyükse görüntü, her ekran pikseli
+    kapladığı piksellerin ortalaması alınarak küçültülür; poligon kenarlarındaki tırtıklar yumuşar.
+    Bunun için iç çözünürlük 7× ve 8× seçenekleri eklendi (1080p ekranda önerilir; yalnızca ekran
+    kartı çiziminde, işlemcide 6× ile sınırlanır).
+  - **3D doku filtresi:** Kapalı, Yumuşak (bilinear) ya da **Keskin yumuşatma** (doku pikselleri keskin
+    kalır, yalnızca aralarındaki sınır yumuşatılır).
   - **Gelişmiş › İşlemci hızı:** emüle edilen PS1 işlemcisini %150–%300 hızlandırır; oyunun
     kalabalık sahnelerdeki kendi yavaşlamaları azalır (oyun hızlanmaz). Yüklemeler de kısalır.
   - **Kontroller:** her PS1 tuşunun (×, ○, □, △, L1/R1, L2/R2, START, SELECT, L3/R3)

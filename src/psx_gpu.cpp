@@ -1,3 +1,6 @@
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include "vsport/psx_gpu.hpp"
 
 #include <algorithm>
@@ -73,6 +76,8 @@ void PsxGpu::reset() {
     std::fill(vram_.begin(), vram_.end(), static_cast<u16>(0));
     if (hr_) hr_->clear();
     hr_batch_.clear();
+    hr_batch_offs_.clear();
+    interp_clear();
     fifo_.clear();
     expected_words_   = 0;
     mode_             = Gp0Mode::Command;
@@ -148,10 +153,14 @@ void PsxGpu::write_gp1(u32 word) {
         case 0x04: // DMA Direction
             gpustat_ = (gpustat_ & ~(3u << 29)) | ((param & 3u) << 29);
             break;
-        case 0x05: // Start of Display Area in VRAM
-            disp_vram_x_ = param & 0x3FEu;
-            disp_vram_y_ = (param >> 10) & 0x1FFu;
+        case 0x05: { // Start of Display Area in VRAM
+            const u32 nx = param & 0x3FEu, ny = (param >> 10) & 0x1FFu;
+            const bool changed = nx != disp_vram_x_ || ny != disp_vram_y_;
+            disp_vram_x_ = nx;
+            disp_vram_y_ = ny;
+            if (changed) interp_on_swap();
             break;
+        }
         case 0x07: { // Vertical Display Range on Screen (Y1..Y2)
             const u32 y1 = param & 0x3FFu;
             const u32 y2 = (param >> 10) & 0x3FFu;
@@ -202,6 +211,8 @@ void PsxGpu::write_gp0(u32 word) {
                 if (++xfer_cy_ >= xfer_h_) {
                     mode_ = Gp0Mode::Command;
                     hr_sync_rect(xfer_x_, xfer_y_, xfer_w_, xfer_h_); // Uploaded image -> upscaled copy
+                    track_upload(xfer_x_, xfer_y_, xfer_w_, xfer_h_);
+                    if (interp_on_) interp_write(static_cast<s32>(xfer_x_), static_cast<s32>(xfer_y_), static_cast<s32>(xfer_x_ + xfer_w_ - 1), static_cast<s32>(xfer_y_ + xfer_h_ - 1));
                 }
             }
         }
@@ -409,8 +420,10 @@ void PsxGpu::hr_queue(const HrPrim& prim, s32 bx1, s32 by1, s32 bx2, s32 by2) {
             rim_pending_.clear();
         }
         hr_batch_.push_back(p);
+        hr_batch_offs_.push_back({draw_off_x_, draw_off_y_});
         hr_mark_tex_cells(t.tx1, t.ty1, t.tx2, t.ty2);
         if (t.has_clut) hr_mark_tex_cells(t.cx1, t.cy1, t.cx2, t.cy2);
+        if (texrep_ && !p.self_tex && p.texwin == 0 && texrep_->active()) hr_match_replacement(hr_batch_.back());
         // A primitive that draws over its own texture must be drawn before its native draw
         if (own_tex) {
             flush_hr();
@@ -418,17 +431,132 @@ void PsxGpu::hr_queue(const HrPrim& prim, s32 bx1, s32 by1, s32 bx2, s32 by2) {
         }
     } else {
         hr_batch_.push_back(p);
+        hr_batch_offs_.push_back({draw_off_x_, draw_off_y_});
     }
     if (hr_batch_.size() >= 16384u) flush_hr();
+}
+
+void PsxGpu::rebuild_upload_cells() {
+    upload_cells_.fill(0);
+    for (const TexUpload& u : uploads_) {
+        const u16 cols = cell_cols(u.x, u.x + u.w - 1);
+        for (s32 r = u.y / 16; r <= (u.y + u.h - 1) / 16; ++r) upload_cells_[static_cast<std::size_t>(r)] |= cols;
+    }
+}
+
+void PsxGpu::invalidate_uploads(s32 x1, s32 y1, s32 x2, s32 y2) {
+    if (uploads_.empty()) return;
+    // Quick test on the cells first: drawing mostly happens far from the textures
+    const u16 cols = cell_cols(x1, x2);
+    bool hit = false;
+    for (s32 r = std::clamp(y1, 0, 511) / 16; r <= std::clamp(y2, 0, 511) / 16 && !hit; ++r) {
+        hit = (upload_cells_[static_cast<std::size_t>(r)] & cols) != 0;
+    }
+    if (!hit) return;
+    // An upload written over completely is gone; partly written over, the rest is still usable
+    const std::size_t before = uploads_.size();
+    std::erase_if(uploads_, [&](TexUpload& u) {
+        const s32 ux2 = u.x + u.w - 1, uy2 = u.y + u.h - 1;
+        if (!rects_overlap(x1, y1, x2, y2, u.x, u.y, ux2, uy2)) return false;
+        if (x1 <= u.x && y1 <= u.y && x2 >= ux2 && y2 >= uy2) return true;
+        const u16 d[4] = {static_cast<u16>(std::max<s32>(x1, u.x)), static_cast<u16>(std::max<s32>(y1, u.y)),
+                          static_cast<u16>(std::min(x2, ux2)), static_cast<u16>(std::min(y2, uy2))};
+        for (u32 i = 0; i < u.ndamage; ++i) {
+            if (d[0] >= u.dmg[i][0] && d[1] >= u.dmg[i][1] && d[2] <= u.dmg[i][2] && d[3] <= u.dmg[i][3]) return false; // Known
+        }
+        if (u.ndamage < TexUpload::MAX_DAMAGE) {
+            std::copy(d, d + 4, u.dmg[u.ndamage++]);
+        } else {
+            u16* m = u.dmg[TexUpload::MAX_DAMAGE - 1];
+            m[0] = std::min(m[0], d[0]); m[1] = std::min(m[1], d[1]); m[2] = std::max(m[2], d[2]); m[3] = std::max(m[3], d[3]);
+        }
+        return false;
+    });
+    if (uploads_.size() != before) rebuild_upload_cells();
+}
+
+void PsxGpu::track_upload(u32 x, u32 y, u32 w, u32 h) {
+    // Writes wrapping around the VRAM edge are never treated as textures
+    const s32 x2 = static_cast<s32>(std::min(x + w, VRAM_WIDTH)) - 1, y2 = static_cast<s32>(std::min(y + h, VRAM_HEIGHT)) - 1;
+    invalidate_uploads(static_cast<s32>(x), static_cast<s32>(y), x2, y2);
+    if (x + w > VRAM_WIDTH || y + h > VRAM_HEIGHT) return;
+    if (uploads_.size() >= 4096u) uploads_.erase(uploads_.begin());
+    TexUpload u;
+    u.x = static_cast<u16>(x); u.y = static_cast<u16>(y); u.w = static_cast<u16>(w); u.h = static_cast<u16>(h);
+    u.hash = hash_vram_rect(vram_.data(), x, y, w, h);
+    uploads_.push_back(u);
+    rebuild_upload_cells();
+}
+
+void PsxGpu::hr_match_replacement(HrPrim& p) {
+    ++repl_considered_;
+    s32 umin, umax, vmin, vmax;
+    if (p.is_rect) {
+        umin = p.bu; umax = p.bu + p.rw - 1;
+        vmin = p.bv; vmax = p.bv + p.rh - 1;
+        if (umax > 255 || vmax > 255 || p.rw <= 0 || p.rh <= 0) return; // Wraps inside the page
+    } else {
+        umin = std::min({p.v[0].u, p.v[1].u, p.v[2].u}); umax = std::max({p.v[0].u, p.v[1].u, p.v[2].u});
+        vmin = std::min({p.v[0].v, p.v[1].v, p.v[2].v}); vmax = std::max({p.v[0].v, p.v[1].v, p.v[2].v});
+    }
+    const u32 depth = std::min(2u, (p.texpage >> 7) & 3u);
+    const s32 per_word = depth == 0 ? 4 : depth == 1 ? 2 : 1;
+    const s32 tpx = static_cast<s32>((p.texpage & 0x0Fu) * 64u), tpy = static_cast<s32>(((p.texpage >> 4) & 1u) * 256u);
+    const s32 x1 = tpx + umin / per_word, x2 = tpx + umax / per_word, y1 = tpy + vmin, y2 = tpy + vmax;
+    if (x2 > 1023 || y2 > 511) return;
+    const TexUpload* up = nullptr;
+    for (auto it = uploads_.rbegin(); it != uploads_.rend(); ++it) {
+        if (x1 >= it->x && x2 < it->x + it->w && y1 >= it->y && y2 < it->y + it->h) {
+            bool damaged = false;
+            for (u32 i = 0; i < it->ndamage && !damaged; ++i) {
+                damaged = rects_overlap(x1, y1, x2, y2, it->dmg[i][0], it->dmg[i][1], it->dmg[i][2], it->dmg[i][3]);
+            }
+            if (!damaged) up = &*it;
+            break; // The newest upload covering these texels decides
+        }
+    }
+    if (!up) return;
+    ++repl_in_upload_;
+    u64 pal = 0;
+    if (depth < 2u) {
+        const u32 cx = (p.clut & 0x3Fu) * 16u, cy = (p.clut >> 6) & 0x1FFu, n = depth == 0 ? 16u : 256u;
+        if (cx + n > VRAM_WIDTH) return;
+        pal = hash_vram_rect(vram_.data(), cx, cy, n, 1);
+    }
+    const TexImage* img = texrep_->lookup(*up, depth, pal, vram_.data(), p.clut);
+    if (!img) return;
+    p.repl   = img;
+    p.rep_u0 = static_cast<float>((up->x - tpx) * per_word);
+    p.rep_v0 = static_cast<float>(up->y - tpy);
+    p.rep_su = static_cast<float>(up->w * per_word);
+    p.rep_sv = static_cast<float>(up->h);
 }
 
 void PsxGpu::flush_hr() {
     if (hr_batch_.empty()) return;
     if (hr_scale_ > 1u && hr_) {
-        hr_->set_options({tex_filter_, persp_tex_, rim_mode_ == RimLight::Soft});
+        HrOptions o;
+        o.texture_filter = tex_filter_;
+        o.sharp_filter   = tex_filter_sharp_;
+        o.depth_buffer   = depth_buffer_;
+        o.perspective    = persp_tex_;
+        o.soft_rim       = rim_mode_ == RimLight::Soft;
+        hr_->set_options(o);
         hr_->draw(hr_batch_, batch_y1_, batch_y2_, vram_.data());
+        if (interp_on_) {
+            // Frame interpolation: keep the frame's primitives (as drawn, incl. rim-light shifts)
+            if (rec_cur_.ops.empty() || rec_cur_.ops.back().fill) {
+                rec_cur_.ops.emplace_back();
+                rec_cur_.offs.emplace_back();
+            }
+            HrOp& op = rec_cur_.ops.back();
+            op.prims.insert(op.prims.end(), hr_batch_.begin(), hr_batch_.end());
+            rec_cur_.offs.back().insert(rec_cur_.offs.back().end(), hr_batch_offs_.begin(), hr_batch_offs_.end());
+            for (const HrPrim& p : hr_batch_) rec_cur_.safe = rec_cur_.safe && !p.self_tex;
+        }
     }
     hr_batch_.clear();
+    hr_batch_offs_.clear();
 }
 
 void PsxGpu::set_internal_scale(u32 scale) {
@@ -503,6 +631,7 @@ void PsxGpu::rasterize_triangle(const Vertex& v0, const Vertex& v1_in, const Ver
     if (min_x > max_x || min_y > max_y) {
         return;
     }
+    invalidate_uploads(min_x, min_y, max_x, max_y);
 
     const auto edge = [](s32 ax, s32 ay, s32 bx, s32 by, s32 px, s32 py) -> s64 {
         return static_cast<s64>(px - ax) * (by - ay) - static_cast<s64>(py - ay) * (bx - ax);
@@ -709,6 +838,11 @@ void PsxGpu::dispatch_gp0_packet() {
             p.texpage = texpage_;
             hr_queue(p, rx, ry, rx + rw - 1, ry + rh - 1);
         }
+        {
+            const s32 ix1 = std::max(rx, clip_x1_), iy1 = std::max(ry, clip_y1_);
+            const s32 ix2 = std::min(rx + rw - 1, clip_x2_), iy2 = std::min(ry + rh - 1, clip_y2_);
+            if (ix1 <= ix2 && iy1 <= iy2) invalidate_uploads(ix1, iy1, ix2, iy2);
+        }
         for (s32 dy = 0; dy < rh; ++dy) {
             const s32 py = ry + dy;
             if (py < clip_y1_ || py > clip_y2_) continue;
@@ -759,6 +893,15 @@ void PsxGpu::dispatch_gp0_packet() {
                 }
             }
             hr_sync_rect(fx, fy, fw, fh);
+            if (interp_on_ && hr_scale_ > 1u) {
+                HrOp fop;
+                fop.fill = true;
+                fop.x = static_cast<s32>(fx); fop.y = static_cast<s32>(fy); fop.w = static_cast<s32>(fw); fop.h = static_cast<s32>(fh);
+                fop.color = fill_col;
+                rec_cur_.ops.push_back(std::move(fop));
+                rec_cur_.offs.emplace_back();
+            }
+            if (fw > 0 && fh > 0) invalidate_uploads(static_cast<s32>(fx), static_cast<s32>(fy), static_cast<s32>(fx + fw - 1), static_cast<s32>(fy + fh - 1));
             ++primitives_drawn_;
             break;
         }
@@ -781,6 +924,8 @@ void PsxGpu::dispatch_gp0_packet() {
                 }
             }
             hr_copy_rect(sx, sy, dx, dy, cw, ch); // Keep the copied picture at full detail
+            invalidate_uploads(static_cast<s32>(dx), static_cast<s32>(dy), static_cast<s32>(dx + cw - 1), static_cast<s32>(dy + ch - 1));
+            if (interp_on_) interp_write(static_cast<s32>(dx), static_cast<s32>(dy), static_cast<s32>(dx + cw - 1), static_cast<s32>(dy + ch - 1));
             break;
         }
         case 0xA0: { // CPU -> VRAM Transfer
@@ -814,6 +959,11 @@ void PsxGpu::dispatch_gp0_packet() {
             break;
         }
         case 0xE3: { // Drawing Area Top-Left
+            if (depth_buffer_ && hr_scale_ > 1u && hr_) {
+                // The game sets the drawing area when it starts a new picture: depth starts over
+                flush_hr();
+                hr_->clear_depth();
+            }
             clip_x1_ = static_cast<s32>(w0 & 0x3FFu);
             clip_y1_ = static_cast<s32>((w0 >> 10) & 0x1FFu);
             break;
@@ -944,6 +1094,208 @@ bool PsxGpu::dump_ppm(const std::filesystem::path& path, bool full_vram) const {
             row[x * 3u + 0] = static_cast<u8>(((px & 0x1Fu) * 527u + 23u) >> 6);
             row[x * 3u + 1] = static_cast<u8>((((px >> 5) & 0x1Fu) * 527u + 23u) >> 6);
             row[x * 3u + 2] = static_cast<u8>((((px >> 10) & 0x1Fu) * 527u + 23u) >> 6);
+        }
+        out.write(reinterpret_cast<const char*>(row.data()), static_cast<std::streamsize>(row.size()));
+    }
+    return out.good();
+}
+
+// --- Frame interpolation -------------------------------------------------------------------
+
+namespace {
+// Identity of a primitive across frames: what it draws, not where (texture, CLUT, texture
+// coordinates, colours for untextured ones). Positions are matched separately.
+u64 interp_key(const HrPrim& p) noexcept {
+    u64 h = 0xCBF29CE484222325ull;
+    const auto mix = [&](u64 v) { h = (h ^ v) * 0x100000001B3ull; };
+    mix((p.is_rect ? 1u : 0u) | (p.textured ? 2u : 0u) | (p.semi ? 4u : 0u) | (p.rim ? 8u : 0u) | (p.shaded ? 16u : 0u));
+    if (p.textured) {
+        mix(p.texpage);
+        mix(p.clut);
+        if (p.is_rect) {
+            mix(static_cast<u64>(p.bu) | (static_cast<u64>(p.bv) << 8));
+            mix(static_cast<u64>(p.rw) | (static_cast<u64>(p.rh) << 16));
+        } else {
+            for (int i = 0; i < 3; ++i) mix(static_cast<u64>(p.v[i].u) | (static_cast<u64>(p.v[i].v) << 8));
+        }
+    } else if (p.is_rect) {
+        mix(static_cast<u64>(p.cr) | (static_cast<u64>(p.cg) << 8) | (static_cast<u64>(p.cb) << 16));
+        mix(static_cast<u64>(p.rw) | (static_cast<u64>(p.rh) << 16));
+    } else {
+        for (int i = 0; i < 3; ++i) mix(static_cast<u64>(p.v[i].r) | (static_cast<u64>(p.v[i].g) << 8) | (static_cast<u64>(p.v[i].b) << 16));
+    }
+    return h;
+}
+float vpos_x(const GpuVertex& v) noexcept { return v.exact ? v.fx : static_cast<float>(v.x); }
+float vpos_y(const GpuVertex& v) noexcept { return v.exact ? v.fy : static_cast<float>(v.y); }
+void prim_centre(const HrPrim& p, float& x, float& y) noexcept {
+    if (p.is_rect) {
+        x = static_cast<float>(p.rx) + static_cast<float>(p.rw) * 0.5f;
+        y = static_cast<float>(p.ry) + static_cast<float>(p.rh) * 0.5f;
+    } else {
+        x = (vpos_x(p.v[0]) + vpos_x(p.v[1]) + vpos_x(p.v[2])) / 3.0f;
+        y = (vpos_y(p.v[0]) + vpos_y(p.v[1]) + vpos_y(p.v[2])) / 3.0f;
+    }
+}
+} // namespace
+
+void PsxGpu::picture_snapshot(bool restore) {
+    if (restore) { rim_dx_ = snap_rim_dx_; rim_dy_ = snap_rim_dy_; }
+    else { snap_rim_dx_ = rim_dx_; snap_rim_dy_ = rim_dy_; }
+    if (!hr_ || hr_scale_ <= 1u) return;
+    if (!restore) flush_hr();
+    hr_->snapshot(restore);
+}
+
+void PsxGpu::interp_clear() {
+    rec_cur_   = RecFrame{};
+    rec_prev_  = RecFrame{};
+    alt_shown_ = false;
+}
+
+void PsxGpu::set_frame_interpolation(bool on) {
+    if (on == interp_on_) return;
+    flush_hr();
+    interp_on_ = on;
+    interp_clear();
+}
+
+void PsxGpu::on_vblank() noexcept {
+    ++vb_count_;
+    if (alt_shown_ && static_cast<s32>(vb_count_ - alt_end_vb_) >= 0) alt_shown_ = false;
+}
+
+void* PsxGpu::display_picture_view() const {
+    if (!hr_ || hr_scale_ <= 1u) return nullptr;
+    if (alt_shown_) {
+        if (void* v = hr_->gpu_alt_picture_view()) return v;
+    }
+    return hr_->gpu_picture_view();
+}
+
+void PsxGpu::interp_write(s32 x1, s32 y1, s32 x2, s32 y2) {
+    // An image put straight into the picture (a movie frame, a background) cannot be redrawn from
+    // the recorded primitives. Checked at the swap against the area then shown; a few pixels (the
+    // game writes a 2x1 marker every frame) do not matter.
+    if ((x2 - x1 + 1) * (y2 - y1 + 1) > 16) rec_cur_.writes.push_back({x1, y1, x2, y2});
+}
+void PsxGpu::interp_on_swap() {
+    const u32 interval = vb_count_ - last_swap_vb_;
+    last_swap_vb_ = vb_count_;
+    alt_shown_ = false;
+    if (!interp_on_ || hr_scale_ <= 1u || !hr_) {
+        interp_clear();
+        return;
+    }
+    flush_hr(); // The new picture is complete (and its last primitives recorded)
+    {
+        const s32 dx1 = static_cast<s32>(disp_vram_x_), dy1 = static_cast<s32>(disp_vram_y_);
+        const s32 dx2 = dx1 + static_cast<s32>(disp_width_) - 1, dy2 = dy1 + static_cast<s32>(disp_height_) - 1;
+        for (const auto& w : rec_cur_.writes) {
+            if (rects_overlap(w[0], w[1], w[2], w[3], dx1, dy1, dx2, dy2)) rec_cur_.safe = false;
+        }
+    }
+    // Only the steady 2-vblank rhythm is interpolated (the in-between picture is exactly halfway)
+    const bool usable = interval == 2u && rec_prev_.safe && rec_cur_.safe && !rec_prev_.ops.empty() && !rec_cur_.ops.empty();
+    if (usable) {
+        struct Ref {
+            const HrPrim* p;
+            s32 ox, oy;
+            float cx, cy; // Centre relative to the drawing offset
+            bool used;
+        };
+        std::vector<Ref> prev;
+        std::unordered_map<u64, std::vector<u32>> index;
+        for (std::size_t o = 0; o < rec_prev_.ops.size(); ++o) {
+            const HrOp& op = rec_prev_.ops[o];
+            for (std::size_t i = 0; i < op.prims.size() && !op.fill; ++i) {
+                Ref r{&op.prims[i], rec_prev_.offs[o][i][0], rec_prev_.offs[o][i][1], 0.0f, 0.0f, false};
+                prim_centre(op.prims[i], r.cx, r.cy);
+                r.cx -= static_cast<float>(r.ox);
+                r.cy -= static_cast<float>(r.oy);
+                index[interp_key(op.prims[i])].push_back(static_cast<u32>(prev.size()));
+                prev.push_back(r);
+            }
+        }
+        std::vector<HrOp> mid = rec_cur_.ops;
+        u32 total = 0, matched = 0;
+        for (std::size_t o = 0; o < mid.size(); ++o) {
+            HrOp& op = mid[o];
+            for (std::size_t i = 0; i < op.prims.size() && !op.fill; ++i) {
+                HrPrim& q = op.prims[i];
+                ++total;
+                const auto it = index.find(interp_key(q));
+                if (it == index.end()) continue;
+                const s32 qox = rec_cur_.offs[o][i][0], qoy = rec_cur_.offs[o][i][1];
+                float qcx, qcy;
+                prim_centre(q, qcx, qcy);
+                qcx -= static_cast<float>(qox);
+                qcy -= static_cast<float>(qoy);
+                // Same primitive in the previous frame: the nearest unused one with the same identity
+                Ref* best = nullptr;
+                float best_d = 0.0f;
+                for (u32 k : it->second) {
+                    Ref& r = prev[k];
+                    if (r.used) continue;
+                    const float d = std::abs(r.cx - qcx) + std::abs(r.cy - qcy);
+                    if (!best || d < best_d) { best = &r; best_d = d; }
+                }
+                if (!best) continue;
+                best->used = true;
+                ++matched;
+                if (q.is_rect) continue; // Sprites (text, gauges) stay where they are
+                const HrPrim& a = *best->p;
+                const float dx = static_cast<float>(qox - best->ox), dy = static_cast<float>(qoy - best->oy); // Into this frame's coordinates
+                float ax[3], ay[3], maxd = 0.0f;
+                for (int v = 0; v < 3; ++v) {
+                    ax[v] = vpos_x(a.v[v]) + dx;
+                    ay[v] = vpos_y(a.v[v]) + dy;
+                    maxd = std::max({maxd, std::abs(ax[v] - vpos_x(q.v[v])), std::abs(ay[v] - vpos_y(q.v[v]))});
+                }
+                if (maxd > 48.0f) continue; // Too far for the same polygon: probably another one
+                for (int v = 0; v < 3; ++v) {
+                    GpuVertex& b = q.v[v];
+                    const float mx = (ax[v] + vpos_x(b)) * 0.5f, my = (ay[v] + vpos_y(b)) * 0.5f;
+                    b.fz = (a.v[v].exact && b.exact) ? (a.v[v].fz + b.fz) * 0.5f : (b.exact ? b.fz : 0.0f);
+                    b.exact = true;
+                    b.fx = mx;
+                    b.fy = my;
+                    b.x = static_cast<s32>(std::floor(mx));
+                    b.y = static_cast<s32>(std::floor(my));
+                }
+            }
+        }
+        // Too little found again: a scene change, shown as it is
+        if (total > 0 && matched * 2 >= total && hr_->render_alternate(mid, vram_.data())) {
+            alt_shown_  = true;
+            alt_end_vb_ = vb_count_ + 2; // Shown at the next presented vblank, then the new picture
+            ++interp_count_;
+        } else {
+            ++interp_skipped_;
+        }
+    } else if (!rec_cur_.ops.empty()) {
+        ++interp_skipped_;
+    }
+    rec_prev_ = std::move(rec_cur_);
+    rec_cur_  = RecFrame{};
+}
+
+bool PsxGpu::dump_interpolated_ppm(const std::filesystem::path& path) {
+    if (!hr_ || hr_scale_ <= 1u) return false;
+    const std::vector<u32>* pic = hr_->alt_picture();
+    const u32 s = hr_scale_, hw = VRAM_WIDTH * s, hh = VRAM_HEIGHT * s;
+    if (!pic || pic->size() != static_cast<std::size_t>(hw) * hh) return false;
+    std::ofstream out(path, std::ios::binary);
+    if (!out) return false;
+    const u32 w = disp_width_, h = disp_height_, sx = disp_vram_x_, sy = disp_vram_y_;
+    out << "P6\n" << (w * s) << " " << (h * s) << "\n255\n";
+    std::vector<u8> row(w * s * 3u);
+    for (u32 y = 0; y < h * s; ++y) {
+        for (u32 x = 0; x < w * s; ++x) {
+            const u32 px = (*pic)[static_cast<std::size_t>((sy * s + y) % hh) * hw + (sx * s + x) % hw];
+            row[x * 3u + 0] = static_cast<u8>(px & 0xFFu);
+            row[x * 3u + 1] = static_cast<u8>((px >> 8) & 0xFFu);
+            row[x * 3u + 2] = static_cast<u8>((px >> 16) & 0xFFu);
         }
         out.write(reinterpret_cast<const char*>(row.data()), static_cast<std::streamsize>(row.size()));
     }

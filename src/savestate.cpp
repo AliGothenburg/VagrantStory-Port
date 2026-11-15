@@ -5,11 +5,14 @@
 #include "vsport/runtime.hpp"
 #include "vsport/state_io.hpp"
 
+#include <algorithm>
+#include <cstring>
+
 namespace vsport {
 
 namespace {
 constexpr u32 STATE_MAGIC   = 0x54535356u; // "VSST"
-constexpr u32 STATE_VERSION = 1;
+constexpr u32 STATE_VERSION = 2; // 2: reverb state, voice history for cubic interpolation
 constexpr u32 fourcc(char a, char b, char c, char d) {
     return static_cast<u32>(static_cast<u8>(a)) | (static_cast<u32>(static_cast<u8>(b)) << 8) |
            (static_cast<u32>(static_cast<u8>(c)) << 16) | (static_cast<u32>(static_cast<u8>(d)) << 24);
@@ -41,16 +44,20 @@ void PsxGpu::serialize(StateIO& io) {
     io.pod(draw_off_x_); io.pod(draw_off_y_);
     io.pod(disp_vram_x_); io.pod(disp_vram_y_); io.pod(disp_width_); io.pod(disp_height_);
     io.pod(primitives_drawn_);
+    io.vec(uploads_); // Texture replacement: which VRAM areas still hold an untouched upload
     if (!io.saving()) {
+        rebuild_upload_cells();
         // Host-only drawing state: nothing queued, and the upscaled picture restarts from the
         // native one (it sharpens again as the game redraws, within a frame or two)
         vram_.resize(static_cast<std::size_t>(VRAM_WIDTH) * VRAM_HEIGHT);
         hr_batch_.clear();
+        hr_batch_offs_.clear();
+        interp_clear();
         rim_pending_.clear();
         batch_has_tex_ = false;
         tex_cells_.fill(0);
         hr_rim_ = false;
-        hr_sync_rect(0, 0, VRAM_WIDTH, VRAM_HEIGHT);
+        if (!keep_picture_on_load_) hr_sync_rect(0, 0, VRAM_WIDTH, VRAM_HEIGHT); // Runahead restores its own copy
     }
 }
 
@@ -64,6 +71,7 @@ void PsxSpu::serialize(StateIO& io) {
     io.pod(irq_addr_reg_); io.pod(endx_mask_); io.pod(irq_pending_);
     io.pod(xa_hist_l1_); io.pod(xa_hist_l2_); io.pod(xa_hist_r1_); io.pod(xa_hist_r2_);
     io.deq(cd_audio_fifo_);
+    io.pod(rev_addr_); io.pod(rev_phase_); io.pod(rev_acc_l_); io.pod(rev_acc_r_); io.pod(rev_out_l_); io.pod(rev_out_r_);
     io.pod(cycle_accum_);
     io.pod(bytes_uploaded_); io.pod(key_on_events_); io.pod(xa_sectors_decoded_); io.pod(frames_rendered_);
     if (!io.saving()) {
@@ -135,6 +143,26 @@ bool PsxRuntime::load_state(std::vector<u8> data, CpuContext& ctx) {
     return true;
 }
 
+void PsxRuntime::runahead_snapshot(bool restore) {
+    if (restore) {
+        pgxp_ = pgxp_snap_;
+    } else {
+        pgxp_.prune();
+        pgxp_snap_ = pgxp_;
+    }
+    gpu_.picture_snapshot(restore);
+}
+
+bool PsxRuntime::load_state_fast(const std::vector<u8>& data, CpuContext& ctx) {
+    StateIO io(data);
+    fast_load_ = true;
+    gpu_.set_keep_picture_on_load(true);
+    serialize_state(io, ctx);
+    gpu_.set_keep_picture_on_load(false);
+    fast_load_ = false;
+    return io.ok();
+}
+
 void PsxRuntime::serialize_state(StateIO& io, CpuContext& ctx) {
     io.tag(STATE_MAGIC);
     io.tag(STATE_VERSION);
@@ -146,7 +174,24 @@ void PsxRuntime::serialize_state(StateIO& io, CpuContext& ctx) {
     io.pod(ctx.cop0); io.pod(ctx.cycles); io.pod(ctx.halted);
 
     io.tag(fourcc('R', 'A', 'M', ' '));
-    if (ram_size) io.raw(ram_.data(), ram_.size());
+    if (ram_size && !io.saving() && fast_load_) {
+        // Runahead: only pages that really differ are written and count as rewritten, so the
+        // native code of unchanged pages stays valid (marking all of them is very slow per frame)
+        static std::vector<u8> tmp;
+        tmp.resize(ram_.size());
+        io.raw(tmp.data(), tmp.size());
+        if (io.ok()) {
+            for (std::size_t off = 0; off < ram_.size(); off += 4096u) {
+                const std::size_t len = std::min<std::size_t>(4096u, ram_.size() - off);
+                if (std::memcmp(&ram_[off], &tmp[off], len) == 0) continue;
+                std::memcpy(&ram_[off], &tmp[off], len);
+                u32& e = ram_page_epoch_[off >> 12];
+                if (++e == 0) e = 1u;
+            }
+        }
+    } else if (ram_size) {
+        io.raw(ram_.data(), ram_.size());
+    }
     io.pod(scratchpad_);
 
     gte_.serialize(io);
@@ -189,10 +234,12 @@ void PsxRuntime::serialize_state(StateIO& io, CpuContext& ctx) {
 
     if (!io.saving()) {
         // RAM changed under the native-code cache: every page counts as rewritten
-        for (u32& e : ram_page_epoch_) {
-            if (++e == 0) e = 1u;
+        if (!fast_load_) {
+            for (u32& e : ram_page_epoch_) {
+                if (++e == 0) e = 1u;
+            }
         }
-        pgxp_.clear(); // Exact vertex positions of the old timeline
+        if (!fast_load_) pgxp_.clear(); // Exact vertex positions of the old timeline (runahead: same values)
     }
 }
 
