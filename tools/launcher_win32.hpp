@@ -51,6 +51,9 @@ struct GameSettings {
     bool audio_cubic    = false;  // Cubic instead of linear sample interpolation
     bool cheats         = false;  // Apply the cheat codes in cheats_path()
     int  runahead       = 0;      // Input lag reduction: vblanks run ahead (0..3)
+    bool ra_enabled     = false;  // RetroAchievements (softcore)
+    std::string ra_user;          // RetroAchievements user name
+    std::string ra_token;         // Login token from the server (the password is never stored)
     bool frame_interp   = false;  // Frame interpolation: in-between pictures, 25 -> 50 fps (graphics card renderer)
     bool texture_pack   = true;   // Use replacement textures from texture_pack_dir() (if any)
     bool texture_dump   = false;  // Dump the game's textures (for making packs)

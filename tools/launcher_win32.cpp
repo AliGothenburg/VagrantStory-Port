@@ -1,4 +1,5 @@
 #include "launcher_win32.hpp"
+#include "achievements.hpp"
 
 #include "vsport/cdrom_iso.hpp"
 #include "vsport/d3d11_hr_backend.hpp" // list_graphics_adapters
@@ -85,6 +86,9 @@ GameSettings load_settings(const std::filesystem::path& ini) {
         else if (key == "texture_pack")  s.texture_pack = num != 0;
         else if (key == "frame_interp")  s.frame_interp = num != 0;
         else if (key == "runahead")      s.runahead = clamp_int(num, 0, 3);
+        else if (key == "ra_enabled")    s.ra_enabled = num != 0;
+        else if (key == "ra_user")       s.ra_user = val;
+        else if (key == "ra_token")      s.ra_token = val;
         else if (key == "texture_dump")  s.texture_dump = num != 0;
         else if (key == "rewind")        s.rewind = num != 0;
         else if (key == "cpu_overclock") s.cpu_overclock = clamp_int(num, 100, 400);
@@ -142,6 +146,10 @@ void save_settings(const std::filesystem::path& ini, const GameSettings& s) {
     out << "frame_interp=" << (s.frame_interp ? 1 : 0) << "\n";
     out << "# runahead: gecikme azaltma, ileri calistirilan kare sayisi (0-3)\n";
     out << "runahead=" << s.runahead << "\n";
+    out << "# RetroAchievements: kullanici adi ve sunucunun verdigi oturum anahtari (sifre saklanmaz)\n";
+    out << "ra_enabled=" << (s.ra_enabled ? 1 : 0) << "\n";
+    out << "ra_user=" << s.ra_user << "\n";
+    out << "ra_token=" << s.ra_token << "\n";
     out << "texture_dump=" << (s.texture_dump ? 1 : 0) << "\n";
     out << "# cpu_overclock: emule edilen islemci hizi, yuzde (100 = orijinal)\n";
     out << "cpu_overclock=" << s.cpu_overclock << "\n";
@@ -253,15 +261,15 @@ enum ControlId : int {
     ID_RES_COMBO, ID_TEXFILTER_CHECK,
     ID_CARD_EDIT, ID_CARD_CHANGE, ID_CARD_OPEN,
     ID_MUTE_CHECK, ID_VOLUME_SLIDER, ID_VOLUME_LABEL,
-    ID_SHOW_CHECK, ID_ASPECT_COMBO, ID_RIM_COMBO, ID_PGXP_COMBO, ID_RENDERER_COMBO, ID_GPU_COMBO, ID_RUMBLE_CHECK, ID_OVERCLOCK_COMBO, ID_AUTOSAVE_CHECK, ID_REWIND_CHECK, ID_CHEATS_CHECK, ID_CHEATS_OPEN, ID_REVERB_CHECK, ID_CUBIC_CHECK, ID_TEXPACK_CHECK, ID_TEXPACK_OPEN, ID_TEXDUMP_CHECK, ID_INTERP_CHECK, ID_RUNAHEAD_COMBO,
+    ID_SHOW_CHECK, ID_ASPECT_COMBO, ID_RIM_COMBO, ID_PGXP_COMBO, ID_RENDERER_COMBO, ID_GPU_COMBO, ID_RUMBLE_CHECK, ID_OVERCLOCK_COMBO, ID_AUTOSAVE_CHECK, ID_REWIND_CHECK, ID_CHEATS_CHECK, ID_CHEATS_OPEN, ID_REVERB_CHECK, ID_CUBIC_CHECK, ID_TEXPACK_CHECK, ID_TEXPACK_OPEN, ID_TEXDUMP_CHECK, ID_INTERP_CHECK, ID_RUNAHEAD_COMBO, ID_RA_CHECK, ID_RA_USER, ID_RA_PASS, ID_RA_LOGIN, ID_RA_LOGOUT, ID_RA_STATUS,
     ID_PAD_COMBO0 = 300, // .. ID_PAD_COMBO0 + REMAP_COUNT - 1
     ID_PAD_DEFAULTS = 400,
     ID_NAV0 = 500,       // .. ID_NAV0 + PAGE_COUNT - 1: page buttons on the left
 };
 
 // Pages of the settings window (buttons on the left). A new group of settings = a new page.
-enum Page : int { PAGE_GAME, PAGE_GRAPHICS, PAGE_DISPLAY, PAGE_SOUND, PAGE_CONTROLS, PAGE_ADVANCED, PAGE_COUNT };
-constexpr const wchar_t* PAGE_NAMES[PAGE_COUNT] = {L"Oyun", L"Grafik", L"Ekran", L"Ses", L"Kontroller", L"Gelişmiş"};
+enum Page : int { PAGE_GAME, PAGE_GRAPHICS, PAGE_DISPLAY, PAGE_SOUND, PAGE_CONTROLS, PAGE_ADVANCED, PAGE_ACHIEVEMENTS, PAGE_COUNT };
+constexpr const wchar_t* PAGE_NAMES[PAGE_COUNT] = {L"Oyun", L"Grafik", L"Ekran", L"Ses", L"Kontroller", L"Gelişmiş", L"Başarımlar"};
 constexpr int OVERCLOCK_VALUES[] = {100, 150, 200, 300};
 
 // Layout (logical px): title on top, page buttons on the left, the page on the right, footer below
@@ -296,6 +304,25 @@ HWND make(LauncherState& st, const wchar_t* cls, const wchar_t* text, DWORD styl
 }
 
 HWND item(const LauncherState& st, int id) { return GetDlgItem(st.hwnd, id); }
+
+std::string window_text_utf8(HWND w) {
+    std::wstring t(static_cast<std::size_t>(GetWindowTextLengthW(w)) + 1u, L'\0');
+    t.resize(static_cast<std::size_t>(GetWindowTextW(w, t.data(), static_cast<int>(t.size()))));
+    if (t.empty()) return {};
+    const int n = WideCharToMultiByte(CP_UTF8, 0, t.data(), static_cast<int>(t.size()), nullptr, 0, nullptr, nullptr);
+    std::string s(static_cast<std::size_t>(n), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, t.data(), static_cast<int>(t.size()), s.data(), n, nullptr, nullptr);
+    SecureZeroMemory(t.data(), t.size() * sizeof(wchar_t));
+    return s;
+}
+
+void update_ra_status(LauncherState& st, const std::wstring& extra = {});
+
+void update_ra_status(LauncherState& st, const std::wstring& extra) {
+    const GameSettings& s = *st.s;
+    const std::wstring t = !extra.empty() ? extra : (!s.ra_token.empty() ? L"Giriş yapıldı: " + widen(s.ra_user) : L"Giriş yapılmadı");
+    SetWindowTextW(item(st, ID_RA_STATUS), t.c_str());
+}
 
 void update_status(LauncherState& st) {
     GameSettings& s = *st.s;
@@ -603,6 +630,28 @@ void build_controls(LauncherState& st) {
     make(st, L"STATIC", L"Tuşa basışın sonucu bu kadar erken görünür (emülasyon 2–4 kat çalışır; ara kare üretimi kapanır).",
          SS_LEFT, LX, y, IW, 20, 0);
 
+    // --- Başarımlar: RetroAchievements ---
+    y = begin_page(PAGE_ACHIEVEMENTS);
+    add_check(st, L"RetroAchievements başarımlarını etkinleştir (softcore)", LX, y, IW, 20, ID_RA_CHECK, s.ra_enabled);
+    y += 36;
+    label(L"Kullanıcı adı:", y);
+    make(st, L"EDIT", widen(s.ra_user).c_str(), ES_AUTOHSCROLL | WS_BORDER | tab, CX, y, CW, 24, ID_RA_USER);
+    y += 32;
+    label(L"Şifre:", y);
+    make(st, L"EDIT", L"", ES_AUTOHSCROLL | ES_PASSWORD | WS_BORDER | tab, CX, y, CW, 24, ID_RA_PASS);
+    make(st, L"BUTTON", L"Giriş yap", BS_PUSHBUTTON | tab, CX + CW + 12, y - 2, 120, 28, ID_RA_LOGIN);
+    y += 40;
+    make(st, L"STATIC", L"", SS_LEFT, LX, y + 4, CX + CW - LX, 20, ID_RA_STATUS);
+    make(st, L"BUTTON", L"Çıkış yap", BS_PUSHBUTTON | tab, CX + CW + 12, y, 120, 28, ID_RA_LOGOUT);
+    y += 44;
+    make(st, L"STATIC", L"Başarım seti yalnızca ABD sürümünde (SLUS-01040) var; Avrupa diskinde başarım yüklenmez.\n\n"
+                        L"Yalnızca softcore: anlık kayıt, geri sarma ve hileler kullanılabilir (hardcore için "
+                        L"RetroAchievements onayı gerekir).\n\n"
+                        L"Şifre saklanmaz: giriş yapınca sunucunun verdiği oturum anahtarı VagrantStory.ini'ye yazılır. "
+                        L"Açılan başarımlar pencere başlığında gösterilir.",
+         SS_LEFT, LX, y, IW, 130, 0);
+    update_ra_status(st);
+
     // --- Footer (always visible) ---
     st.building_page = -1;
     const int fy = BODY_Y + BODY_H + 14;
@@ -646,6 +695,13 @@ void read_controls(LauncherState& st) {
     s.audio_cubic   = SendMessageW(item(st, ID_CUBIC_CHECK), BM_GETCHECK, 0, 0) == BST_CHECKED;
     s.rewind        = SendMessageW(item(st, ID_REWIND_CHECK), BM_GETCHECK, 0, 0) == BST_CHECKED;
     s.cpu_overclock = OVERCLOCK_VALUES[clamp_int(static_cast<int>(SendMessageW(item(st, ID_OVERCLOCK_COMBO), CB_GETCURSEL, 0, 0)), 0, 3)];
+    {
+        const bool ra_on = SendMessageW(item(st, ID_RA_CHECK), BM_GETCHECK, 0, 0) == BST_CHECKED;
+        const std::string user = window_text_utf8(item(st, ID_RA_USER));
+        if (user != s.ra_user) s.ra_token.clear(); // The token belongs to the name it was made for
+        s.ra_user = user;
+        s.ra_enabled = ra_on;
+    }
     s.runahead      = clamp_int(static_cast<int>(SendMessageW(item(st, ID_RUNAHEAD_COMBO), CB_GETCURSEL, 0, 0)), 0, 3);
     for (std::size_t i = 0; i < pad::REMAP_COUNT; ++i) {
         const auto sel = SendMessageW(item(st, ID_PAD_COMBO0 + static_cast<int>(i)), CB_GETCURSEL, 0, 0);
@@ -767,6 +823,36 @@ LRESULT CALLBACK LauncherWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
                 }
                 case ID_ASPECT_COMBO:
                     if (HIWORD(wparam) == CBN_SELCHANGE) fill_window_sizes(*st, selected_window_height(*st));
+                    return 0;
+                case ID_RA_LOGIN: {
+                    const std::string user = window_text_utf8(item(*st, ID_RA_USER));
+                    std::string pass = window_text_utf8(item(*st, ID_RA_PASS));
+                    if (user.empty() || pass.empty()) {
+                        update_ra_status(*st, L"Kullanıcı adı ve şifre girin");
+                        return 0;
+                    }
+                    update_ra_status(*st, L"Giriş yapılıyor…");
+                    UpdateWindow(item(*st, ID_RA_STATUS));
+                    HCURSOR old = SetCursor(LoadCursor(nullptr, IDC_WAIT));
+                    std::string token, display, error;
+                    const bool ok = ra::login_with_password(user, pass, token, display, error);
+                    SetCursor(old);
+                    SecureZeroMemory(pass.data(), pass.size());
+                    SetWindowTextW(item(*st, ID_RA_PASS), L""); // The password is not kept anywhere
+                    if (ok) {
+                        s.ra_user = user;
+                        s.ra_token = token;
+                        s.ra_enabled = true;
+                        SendMessageW(item(*st, ID_RA_CHECK), BM_SETCHECK, BST_CHECKED, 0);
+                        update_ra_status(*st, L"✓ Giriş yapıldı: " + widen(display));
+                    } else {
+                        update_ra_status(*st, L"⚠ Giriş başarısız: " + widen(error));
+                    }
+                    return 0;
+                }
+                case ID_RA_LOGOUT:
+                    s.ra_token.clear();
+                    update_ra_status(*st);
                     return 0;
                 case ID_TEXPACK_OPEN: {
                     std::error_code ec;

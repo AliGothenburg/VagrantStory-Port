@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(VagrantStoryPort VERSION 0.1.0 LANGUAGES CXX)
+project(VagrantStoryPort VERSION 0.1.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -42,8 +42,22 @@ target_link_libraries(vs_inspect PRIVATE vsport_core)
 add_executable(vs_recomp tools/vs_recomp.cpp)
 target_link_libraries(vs_recomp PRIVATE vsport_core)
 
+# RetroAchievements: official rcheevos library (MIT, third_party/rcheevos, v12.5.0)
+file(GLOB RCHEEVOS_SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/rcheevos/src/*.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/rcheevos/src/rapi/*.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/rcheevos/src/rcheevos/*.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/rcheevos/src/rhash/*.c)
+add_library(rcheevos STATIC ${RCHEEVOS_SOURCES})
+target_include_directories(rcheevos PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/third_party/rcheevos/include)
+target_compile_definitions(rcheevos PUBLIC RC_CLIENT_SUPPORTS_HASH PRIVATE _CRT_SECURE_NO_WARNINGS)
+if(MSVC)
+    target_compile_options(rcheevos PRIVATE /W0)
+endif()
+
 set(VSPORT_HOST_SOURCES
     tools/vs_host.cpp
+    tools/achievements.cpp
     tools/launcher_win32.cpp
     src/d3d11_renderer.cpp
     src/d3d11_hr_backend.cpp
@@ -75,7 +89,7 @@ if(VSPORT_LINK_AOT AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated_recomp/vs_a
 endif()
 
 foreach(host IN LISTS VSPORT_HOST_TARGETS)
-    target_link_libraries(${host} PRIVATE vsport_core)
+    target_link_libraries(${host} PRIVATE vsport_core rcheevos)
     if(TARGET vsport_aot)
         target_link_libraries(${host} PRIVATE vsport_aot)
         target_compile_definitions(${host} PRIVATE VSPORT_HAS_AOT_MODULES=1)

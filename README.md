@@ -104,6 +104,17 @@ tıklamak yeterlidir (konsol penceresi açılmaz):
     2 karede 50 gerçek kare (gereken 50) ölçüldü: 1 kare önerilir, 2–3 kare ağır sahnelerde oyunu
     yavaşlatabilir. Açıkken ara kare üretimi kapanır.
     F5/F7, geri sarma ve çıkışta kayıt gerçek zaman çizgisinde çalışır. Komut satırı: `--runahead N`.
+  - **RetroAchievements (Başarımlar sayfası):** retroachievements.org hesabınızla giriş yapın; şifre
+    saklanmaz, sunucunun verdiği oturum anahtarı ini'ye yazılır. Vagrant Story'nin başarım seti
+    (200 başarım) yalnızca **ABD sürümünü (SLUS-01040)** tanır; Avrupa diskinde "başarım seti yok"
+    bildirilir. Yalnızca softcore: yeni bir emülatöre hardcore onayı verilmez; anlık kayıt, geri
+    sarma ve hileler kullanılabilir. Açılan başarımlar pencere başlığında ve `VagrantStory.log`'da
+    görünür. Gecikme azaltmada yalnızca gerçek kareler denetlenir. Resmî
+    [rcheevos](https://github.com/RetroAchievements/rcheevos) kütüphanesi (v12.5.0, MIT)
+    `third_party/rcheevos` altındadır. `--ra-hash DISK` bir diskin RA özetini yazar.
+  - **ABD sürümü:** SLUS-01040 diski de çalışır (60 Hz, `.sbi` gerekmez). Derlenmiş oyun kodu Avrupa
+    sürümünden üretildiği için ABD sürümü yorumlayıcıyla çalışır: 4× ekran kartı çiziminde
+    saniyede 84–103 kare (gereken 60). Gecikme azaltma bu sürümde gerçek zamana yetişmez.
   - **Videoları geçme:** oyun açılış videosunu START ile kendisi geçirir; diğer sahnelerde **Tab** hızlı ileri sarar.
   - **Kenar yumuşatma (süper örnekleme):** iç çözünürlük pencereden büyükse görüntü, her ekran pikseli
     kapladığı piksellerin ortalaması alınarak küçültülür; poligon kenarlarındaki tırtıklar yumuşar.

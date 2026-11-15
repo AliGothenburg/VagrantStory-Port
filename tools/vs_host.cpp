@@ -8,6 +8,9 @@
 #include "vsport/win32_input.hpp"
 #include "launcher_win32.hpp"
 #include "vsport/d3d11_hr_backend.hpp"
+#include "achievements.hpp"
+#include "rc_consoles.h"
+#include "rc_hash.h"
 
 #ifdef VSPORT_HAS_AOT_MODULES
 #include "vs_aot_registry.hpp"
@@ -482,6 +485,13 @@ int main(int argc, char** argv) {
             internal_scale = static_cast<u32>(std::strtoul(argv[++i], nullptr, 10));
         } else if (arg == "--texfilter") {
             texture_filter = 1;
+        } else if (arg == "--ra-hash" && i + 1 < argc) {
+            // Diagnostics: the RetroAchievements hash of a disc image (no login needed)
+            char hash[33] = {};
+            rc_hash_init_default_cdreader();
+            const int ok = rc_hash_generate_from_file(hash, RC_CONSOLE_PLAYSTATION, argv[++i]);
+            std::printf("[vs_host] RetroAchievements hash: %s\n", ok ? hash : "(hesaplanamadi)");
+            return ok ? 0 : 1;
         } else if (arg == "--runahead" && i + 1 < argc) {
             runahead_flag = std::clamp(std::atoi(argv[++i]), 0, 3);
         } else if (arg == "--interp" && i + 1 < argc) {
@@ -1102,6 +1112,15 @@ int main(int argc, char** argv) {
         }
     };
 
+    // RetroAchievements (softcore): needs a login made in the settings window (token in the ini)
+    ra::Achievements achievements;
+    if (use_settings && settings.ra_enabled && !settings.ra_token.empty() && !hidden_window) {
+        host_log("RetroAchievements: %s olarak baglaniliyor", settings.ra_user.c_str());
+        achievements.start(rt, settings.ra_user, settings.ra_token, disc_path,
+                           [&](const std::string& m) { host_state.show_notice(hwnd, m); host_log("%s", m.c_str()); },
+                           [&](const std::string& m) { host_log("%s", m.c_str()); });
+    }
+
     // Runahead: after each real vblank (input, sound) the state is saved, N vblanks are run ahead
     // with the same input and the last one is shown, then the saved state is loaded back. The
     // game answers a button N vblanks sooner; it costs N extra emulated vblanks per vblank.
@@ -1163,6 +1182,7 @@ int main(int argc, char** argv) {
             DispatchMessageA(&msg);
         }
         if (!running) return;
+        achievements.pump(); // Server answers (login, game, unlocks)
         cheats.apply(rt);
         if (runahead > 0) {
             rt.request_break(); // The main loop takes over after every vblank (see runahead above)
@@ -1213,6 +1233,7 @@ int main(int argc, char** argv) {
         // Stream synthesized PS1 SPU 44.1 kHz Stereo PCM to Windows audio ring buffer (runahead:
         // the main loop takes the sound of the real vblank only)
         if (runahead == 0) audio.pump_from_spu(rt.spu());
+        achievements.do_frame(); // Real vblanks only (never the ones run ahead)
         if (runahead > 0) return; // Real vblank: shown after running ahead
         } // !ra_show
 
@@ -1311,7 +1332,7 @@ int main(int argc, char** argv) {
             if (host_state.state_op == Win32HostState::OP_SAVE) {
                 save_state_file(state_file(host_state.state_slot), "Durum " + std::to_string(host_state.state_slot));
             } else if (host_state.state_op == Win32HostState::OP_LOAD) {
-                load_state_file(state_file(host_state.state_slot), "Durum " + std::to_string(host_state.state_slot));
+                if (load_state_file(state_file(host_state.state_slot), "Durum " + std::to_string(host_state.state_slot))) achievements.reset();
             }
             host_state.state_op = Win32HostState::OP_NONE;
             if (snapshot_due) {
@@ -1323,7 +1344,10 @@ int main(int argc, char** argv) {
                 // One step back per ~120 ms while F8 is held; the oldest state stays
                 std::vector<u8> st = rewind_states.back();
                 if (rewind_states.size() > 1) rewind_states.pop_back();
-                if (rt.load_state(std::move(st), ctx)) host_state.show_notice(hwnd, "Geri sariliyor");
+                if (rt.load_state(std::move(st), ctx)) {
+                    host_state.show_notice(hwnd, "Geri sariliyor");
+                    achievements.reset();
+                }
                 Sleep(120);
             }
         }
@@ -1344,6 +1368,10 @@ int main(int argc, char** argv) {
     }
     gamepad.set_rumble(false, 0);
     // Shut down step by step (a hang shows in the log); the rest goes when main returns
+    if (achievements.active()) {
+        achievements.shutdown(); // Waits a moment for unlocks still being sent
+        host_log("RetroAchievements kapatildi");
+    }
     audio.shutdown();
     host_log("Ses kapatildi");
     rt.gpu().set_hr_backend(nullptr); // Before the Direct3D device it may share
