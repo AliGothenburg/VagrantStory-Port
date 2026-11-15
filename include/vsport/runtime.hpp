@@ -19,6 +19,8 @@
 
 namespace vsport {
 
+class StateIO;
+
 class PsxRuntime;
 using RecompFunc = void (*)(CpuContext& ctx, PsxRuntime& rt);
 
@@ -79,6 +81,13 @@ public:
 
     // Digital Controller State (16-bit active-low PS1 pad buttons: 0xFFFF = no buttons pressed)
     void set_pad_buttons(u16 buttons_active_low) noexcept { pad_buttons_ = buttons_active_low; }
+    // Emulated CPU speed in percent of the PS1 (100 = original, up to 400)
+    void set_cpu_overclock(u32 percent) noexcept { cpu_overclock_percent_ = percent < 100u ? 100u : (percent > 400u ? 400u : percent); }
+    // Controller type: DualShock (config commands, vibration motors, analog mode) or plain digital pad
+    void set_pad_dualshock(bool on) noexcept { pad_dualshock_ = on; }
+    // Vibration motors as the game last set them: small (on/off) and large (0..255 strength)
+    [[nodiscard]] bool pad_motor_small() const noexcept { return pad_motor_small_ != 0; }
+    [[nodiscard]] u8 pad_motor_large() const noexcept { return pad_motor_large_; }
 
     // BIOS HLE & Syscall Handling
     bool handle_bios_vector(CpuContext& ctx, u32 masked_pc);
@@ -102,6 +111,9 @@ public:
     [[nodiscard]] bool should_unwind(const CpuContext& ctx, bool entered_in_irq, u64 entry_lj) const noexcept {
         if (ctx.halted || (entered_in_irq && !in_interrupt_) || (longjmp_token_ != entry_lj)) {
             return true;
+        }
+        if (break_requested_ && !in_interrupt_) {
+            return true; // Host asked run() to return (save state): unwind the native call stack
         }
         if (cycle_limit_ != 0) {
             const u64 hard_limit = entered_in_irq ? (cycle_limit_ + 5'000'000ull) : cycle_limit_;
@@ -131,6 +143,14 @@ public:
     [[nodiscard]] std::span<const u8> ram_span() const noexcept { return ram_; }
     [[nodiscard]] u32 vblank_count() const noexcept { return vblank_frames_; }
     [[nodiscard]] u64 aot_dispatch_count() const noexcept { return aot_dispatches_; }
+
+    // Save state: the whole machine (memory, CPU, video, sound, CD, ...). The memory card images
+    // are not part of it. Only call between run() calls (see request_break).
+    [[nodiscard]] std::vector<u8> save_state(const CpuContext& ctx);
+    [[nodiscard]] bool load_state(std::vector<u8> data, CpuContext& ctx);
+    // Makes run() return as soon as the CPU is outside an interrupt handler (from the VBlank callback)
+    void request_break() noexcept { break_requested_ = true; }
+    void serialize_state(StateIO& io, CpuContext& ctx);
 
 private:
     struct AotEntry {
@@ -211,6 +231,18 @@ private:
     u8  sio_step_       = 0;
     bool sio_selected_  = false;
     bool sio_is_memcard_ = false;
+    u32 cpu_overclock_percent_ = 100;
+    u64 cpu_overclock_rem_     = 0;
+    // DualShock state (see write_mmio8, SIO0 data)
+    bool pad_dualshock_   = false;
+    bool pad_analog_      = false; // Analog mode (LED on): ID 0x73, sticks reported
+    bool pad_config_      = false; // Configuration mode (ID 0xF3)
+    u8  pad_cmd_          = 0;
+    u8  pad_resp_[6]      = {};
+    u8  pad_resp_len_     = 0;
+    u8  pad_motor_map_[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}; // 0x00 = small motor, 0x01 = large motor
+    u8  pad_motor_small_  = 0;
+    u8  pad_motor_large_  = 0;
     // /ACK timing: delay from TX write to the pad's ACK pulse (~8 bits at SIO_BAUD 0x88 plus the
     // pad's response time), and the pulse width
     static constexpr u32 SIO_ACK_DELAY_CYCLES = 1200;
@@ -267,6 +299,7 @@ private:
 
     std::string tty_buf_;
     u64 cycle_limit_ = 0;
+    bool break_requested_ = false;
     std::function<void()> on_vblank_;
     std::array<u32, 2048> ram_page_epoch_{};
     std::unordered_map<u32, std::vector<AotEntry>> aot_funcs_;

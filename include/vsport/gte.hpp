@@ -7,6 +7,8 @@
 
 namespace vsport {
 
+class StateIO;
+
 // PlayStation COP2 - Geometry Transform Engine (GTE)
 // Implements 32 Data Registers, 32 Control Registers, and fixed-point 3D commands
 // with optional native-port widescreen horizontal projection scaling.
@@ -32,6 +34,9 @@ public:
 
     // Execute raw 32-bit COP2 instruction word (opcode 0x12 with bit 25 = 1)
     void execute(u32 cmd_word) noexcept;
+
+    // Save state: writes or reads the whole state (see state_io.hpp)
+    void serialize(StateIO& io);
 
 private:
     void cmd_rtps(int v_idx, bool sf, bool lm, bool last_vertex) noexcept;

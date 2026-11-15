@@ -29,6 +29,10 @@ public:
     [[nodiscard]] u16 poll();
     void set_button_map(const pad::ButtonMap& map) noexcept { map_ = map; }
 
+    // Vibration of the connected XInput controllers: PS1 small motor (on/off) and large motor
+    // (0..255). Only sends to the controllers when the values change.
+    void set_rumble(bool small_motor, u8 large_motor);
+
 private:
     pad::ButtonMap map_ = pad::default_button_map();
     struct Impl;

@@ -485,33 +485,85 @@ void PsxRuntime::write_mmio8(u32 paddr, u8 val) {
                     sio_stat_ |= 0x0002u;
                 }
                 break;
-            case 1:
-                if (val == 0x42u && !sio_is_memcard_) {
-                    sio_rx_byte_ = 0x41u; // Digital Pad ID low (0x5A41)
-                    sio_step_    = 2;
-                    sio_pad_ack();
-                } else {
+            case 1: {
+                // Command byte. A digital pad knows only 0x42 (read buttons). A DualShock also has
+                // 0x43 (enter / leave configuration mode) and, in configuration mode, 0x44..0x4D
+                // (analog mode, status, vibration motor mapping).
+                const bool known = !sio_is_memcard_ &&
+                                   (val == 0x42u || (pad_dualshock_ && (val == 0x43u || (pad_config_ && val >= 0x44u && val <= 0x4Du))));
+                if (!known) {
                     sio_rx_byte_ = 0xFFu;
                     sio_step_    = 0;
                     sio_stat_ |= 0x0002u;
+                    break;
                 }
+                pad_cmd_      = val;
+                // ID: 0x41 digital (2 data bytes), 0x73 analog, 0xF3 configuration mode (6 data bytes)
+                sio_rx_byte_  = pad_config_ ? 0xF3u : (pad_analog_ ? 0x73u : 0x41u);
+                pad_resp_len_ = (pad_config_ || pad_analog_) ? 6u : 2u;
+                std::memset(pad_resp_, 0, sizeof(pad_resp_));
+                if (val == 0x42u || (val == 0x43u && !pad_config_)) {
+                    pad_resp_[0] = static_cast<u8>(pad_buttons_ & 0xFFu);
+                    pad_resp_[1] = static_cast<u8>((pad_buttons_ >> 8) & 0xFFu);
+                    pad_resp_[2] = pad_resp_[3] = pad_resp_[4] = pad_resp_[5] = 0x80u; // Sticks centred
+                } else if (val == 0x45u) { // Status: model, LED
+                    const u8 r[6] = {0x01, 0x02, static_cast<u8>(pad_analog_ ? 1 : 0), 0x02, 0x01, 0x00};
+                    std::memcpy(pad_resp_, r, 6);
+                } else if (val == 0x46u) {
+                    const u8 r[6] = {0x00, 0x00, 0x01, 0x02, 0x00, 0x0A};
+                    std::memcpy(pad_resp_, r, 6);
+                } else if (val == 0x47u) {
+                    const u8 r[6] = {0x00, 0x00, 0x02, 0x00, 0x01, 0x00};
+                    std::memcpy(pad_resp_, r, 6);
+                } else if (val == 0x4Cu) {
+                    pad_resp_[3] = 0x04u;
+                } else if (val == 0x4Du) { // Motor mapping: answers the old one
+                    std::memcpy(pad_resp_, pad_motor_map_, 6);
+                }
+                sio_step_ = 2;
+                sio_pad_ack();
                 break;
+            }
             case 2:
                 sio_rx_byte_ = 0x5Au; // Ready marker
                 sio_step_    = 3;
                 sio_pad_ack();
                 break;
-            case 3:
-                sio_rx_byte_ = static_cast<u8>(pad_buttons_ & 0xFFu);
-                sio_step_    = 4;
-                sio_pad_ack();
+            default: {
+                // Data byte k: the pad answers pad_resp_[k] while the console sends parameter k
+                const u32 k  = static_cast<u32>(sio_step_) - 3u;
+                sio_rx_byte_ = k < 6u ? pad_resp_[k] : 0xFFu;
+                if (pad_cmd_ == 0x42u && pad_dualshock_ && k < 6u) {
+                    // Vibration: the bytes sent while reading the buttons drive the mapped motors
+                    if (pad_motor_map_[k] == 0x00u) pad_motor_small_ = static_cast<u8>(val & 1u);
+                    if (pad_motor_map_[k] == 0x01u) pad_motor_large_ = val;
+                } else if (pad_cmd_ == 0x43u && k == 0u) {
+                    pad_config_ = val == 0x01u;
+                } else if (pad_cmd_ == 0x44u && k == 0u) {
+                    pad_analog_ = val == 0x01u;
+                } else if (pad_cmd_ == 0x46u && k == 0u && val == 0x01u) {
+                    pad_resp_[2] = 0x01; pad_resp_[3] = 0x01; pad_resp_[4] = 0x01; pad_resp_[5] = 0x14;
+                } else if (pad_cmd_ == 0x4Cu && k == 0u && val == 0x01u) {
+                    pad_resp_[3] = 0x07u;
+                } else if (pad_cmd_ == 0x4Du && k < 6u) {
+                    pad_motor_map_[k] = val;
+                    if (k == 5u) {
+                        // Motors that are no longer mapped stop
+                        bool has_small = false, has_large = false;
+                        for (u8 m : pad_motor_map_) { has_small |= m == 0x00u; has_large |= m == 0x01u; }
+                        if (!has_small) pad_motor_small_ = 0;
+                        if (!has_large) pad_motor_large_ = 0;
+                    }
+                }
+                if (k + 1u >= pad_resp_len_) {
+                    sio_step_ = 0;
+                    sio_stat_ |= 0x0002u; // Final byte does not ACK DSR
+                } else {
+                    ++sio_step_;
+                    sio_pad_ack();
+                }
                 break;
-            case 4:
-            default:
-                sio_rx_byte_ = static_cast<u8>((pad_buttons_ >> 8) & 0xFFu);
-                sio_step_    = 0;
-                sio_stat_ |= 0x0002u; // Final byte does not ACK DSR
-                break;
+            }
         }
         return;
     }
@@ -903,6 +955,13 @@ void PsxRuntime::dispatch_bios_irq_events(CpuContext& ctx, u32 ev_class, u32 ev_
 }
 
 void PsxRuntime::tick_hardware(CpuContext& ctx, u64 elapsed_cycles) {
+    if (cpu_overclock_percent_ != 100u) {
+        // CPU overclock: the hardware (video, timers, CD, sound) advances slower than the CPU, so
+        // the game gets more instructions per frame and its own slowdowns shrink
+        const u64 t = elapsed_cycles * 100ull + cpu_overclock_rem_;
+        elapsed_cycles     = t / cpu_overclock_percent_;
+        cpu_overclock_rem_ = t % cpu_overclock_percent_;
+    }
     if (elapsed_cycles == 0) return;
 
     // 1. Timer 0 (pixel/sysclk) & Timer 1 (HBlank ~2160 cycles) & Timer 2 (sysclk or sysclk/8)
@@ -2251,6 +2310,9 @@ u64 PsxRuntime::run(CpuContext& ctx, u64 max_steps) {
     cycle_limit_         = start + max_steps;
 
     while (!ctx.halted && (ctx.cycles - start) < max_steps) {
+        if (break_requested_ && !in_interrupt_) {
+            break; // Top level, outside interrupt handlers: the state is complete in ctx + memory
+        }
         if (pending_aot_call_pc_ != 0 && ctx.next_pc == ctx.pc + 4u && to_kseg0(ctx.pc) == pending_aot_call_pc_) {
             pending_aot_call_pc_ = 0;
             if (RecompFunc aot = find_aot_func(to_kseg0(ctx.pc))) {
@@ -2263,7 +2325,8 @@ u64 PsxRuntime::run(CpuContext& ctx, u64 max_steps) {
         step_interpreter(ctx);
     }
 
-    cycle_limit_ = prev_limit;
+    cycle_limit_     = prev_limit;
+    break_requested_ = false;
     return ctx.cycles - start;
 }
 

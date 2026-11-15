@@ -17,9 +17,11 @@
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -219,6 +221,20 @@ struct Win32HostState {
     }
     bool fullscreen         = false;
     bool hidden             = false; // --hidden test window: never shown, not even in fullscreen
+
+    // Save states (F5 save, F7 load, F6 next slot, hold F8 rewind): requests set here are carried
+    // out by the main loop once run() has returned (see PsxRuntime::request_break)
+    enum StateOp { OP_NONE, OP_SAVE, OP_LOAD };
+    StateOp state_op        = OP_NONE;
+    int state_slot          = 1;     // 1..5
+    std::string notice;              // Short message shown in the window title
+    ULONGLONG notice_until  = 0;
+
+    void show_notice(HWND hwnd, const std::string& text) {
+        notice       = text;
+        notice_until = GetTickCount64() + 2500;
+        update_window_title(hwnd);
+    }
     WINDOWPLACEMENT windowed_placement{sizeof(WINDOWPLACEMENT)};
 
     // Borderless fullscreen on the window's current monitor (F11 / Alt+Enter)
@@ -249,6 +265,10 @@ struct Win32HostState {
         char title[256]{};
         const char* backend = (d3d && d3d->is_initialized()) ? d3d->shader_mode_name() : "GDI Yazilim";
         const char* sound   = (audio && audio->is_open()) ? (audio->is_muted() ? "Sessiz" : "44.1kHz ADPCM") : "Kapali";
+        if (!notice.empty() && GetTickCount64() < notice_until) {
+            SetWindowTextA(hwnd, ("Vagrant Story - " + notice).c_str());
+            return;
+        }
         std::snprintf(title, sizeof(title),
                       "Vagrant Story Native Port [%s | %s%s | Ses: %s] - F11: Tam ekran | F3: Oran | Shift+F3: 3D genislet | F4: Shader | M: Ses | Tab: Hizli",
                       backend, launcher::ASPECT_NAMES[std::clamp(aspect, 0, launcher::ASPECT_COUNT - 1)],
@@ -328,6 +348,15 @@ LRESULT CALLBACK HostWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) 
                     st->audio->toggle_mute();
                     st->update_window_title(hwnd);
                 }
+            } else if (st && wparam == VK_F5) {
+                st->state_op = Win32HostState::OP_SAVE;
+                st->rt->request_break();
+            } else if (st && wparam == VK_F7) {
+                st->state_op = Win32HostState::OP_LOAD;
+                st->rt->request_break();
+            } else if (st && wparam == VK_F6) {
+                st->state_slot = st->state_slot % 5 + 1;
+                st->show_notice(hwnd, "Durum yuvasi " + std::to_string(st->state_slot));
             } else if (st && wparam == VK_F12) {
                 st->rt->gpu().dump_ppm("vram_snapshot.ppm", true);
                 std::cout << "[vs_host] VRAM goruntusu kaydedildi: vram_snapshot.ppm\n";
@@ -382,6 +411,10 @@ int main(int argc, char** argv) {
     int rim_mode = -1;         // --rim N (-1 = from settings / default)
     bool perf = false;         // --perf
     int gpu_hr = -1;           // --gpu-hr (1) / --cpu-hr (0); -1 = from settings (window) or CPU (headless)
+    std::filesystem::path save_state_path, load_state_path; // --save-state FILE N / --load-state FILE
+    u32 save_state_vblank = 0, until_vblank = 0, break_every = 0;
+    int overclock = -1;       // --overclock PERCENT (-1 = from settings / 100)
+    int rumble_flag = -1;      // --rumble 0/1: DualShock + vibration (-1 = from settings; headless default off)
     std::string adapter_name;  // --adapter NAME: graphics card (empty = settings / automatic)
     bool have_adapter = false;
     bool hidden_window = false; // --hidden
@@ -458,6 +491,19 @@ int main(int argc, char** argv) {
             std::filesystem::create_directories(dir, ec);
             launcher::dump_settings_window(launcher::load_settings(launcher::settings_path()), dir);
             return 0;
+        } else if (arg == "--save-state" && i + 2 < argc) {
+            save_state_path   = argv[++i]; // Headless: save the machine state at VBlank N
+            save_state_vblank = static_cast<u32>(std::strtoul(argv[++i], nullptr, 10));
+        } else if (arg == "--load-state" && i + 1 < argc) {
+            load_state_path = argv[++i];   // Headless: start from a saved state
+        } else if (arg == "--until-vblank" && i + 1 < argc) {
+            until_vblank = static_cast<u32>(std::strtoul(argv[++i], nullptr, 10)); // Headless: stop at VBlank N
+        } else if (arg == "--break-every" && i + 1 < argc) {
+            break_every = static_cast<u32>(std::strtoul(argv[++i], nullptr, 10));  // Diagnostics
+        } else if (arg == "--overclock" && i + 1 < argc) {
+            overclock = std::atoi(argv[++i]);
+        } else if (arg == "--rumble" && i + 1 < argc) {
+            rumble_flag = std::atoi(argv[++i]) != 0 ? 1 : 0;
         } else if (arg == "--cpu-hr") {
             gpu_hr = 0; // Draw the upscaled picture on the processor (software)
         } else if (arg == "--perf") {
@@ -602,6 +648,10 @@ int main(int argc, char** argv) {
         internal_scale = use_settings ? static_cast<u32>(settings.internal_scale) : 1u;
     }
     rt.gpu().set_internal_scale(internal_scale);
+    rt.set_cpu_overclock(static_cast<u32>(overclock >= 0 ? overclock : (use_settings ? settings.cpu_overclock : 100)));
+    // Controller type: DualShock (vibration) unless switched off
+    const bool rumble_on = rumble_flag >= 0 ? rumble_flag == 1 : (use_settings ? settings.rumble : false);
+    rt.set_pad_dualshock(rumble_on);
     // Graphics card: --adapter, else the settings, else automatic (the most powerful one)
     set_preferred_adapter(have_adapter ? adapter_name : (use_settings ? settings.gpu : std::string()));
     // Upscaled picture on the graphics card; on any failure the processor (software) keeps drawing
@@ -697,9 +747,23 @@ int main(int argc, char** argv) {
         if (self_demo) {
             step_hardware_self_demo(rt, 0.55f);
         } else {
-            if (auto_start || !presses.empty() || series_every > 0 || perf) {
-                rt.set_vblank_callback([&rt, &presses, auto_start, &series_dir, series_every, series_from, perf]() {
+            bool save_pending = false;
+            if (!load_state_path.empty()) {
+                std::ifstream in(load_state_path, std::ios::binary);
+                std::vector<u8> data((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+                const bool ok = rt.load_state(std::move(data), ctx);
+                std::printf("[vs_host] Durum yukleme: %s (kare %u)\n", ok ? "tamam" : "HATA", rt.vblank_count());
+            }
+            {
+                rt.set_vblank_callback([&rt, &ctx, &presses, auto_start, &series_dir, series_every, series_from, perf, rumble_flag,
+                                        save_state_vblank, until_vblank, break_every, &save_pending]() {
                     const u32 vb = rt.vblank_count();
+                    if (save_state_vblank != 0 && vb == save_state_vblank) {
+                        save_pending = true;
+                        rt.request_break();
+                    }
+                    if (break_every != 0 && vb % break_every == 0) rt.request_break(); // Diagnostics: unwind often
+                    if (until_vblank != 0 && vb >= until_vblank) ctx.halted = true;
                     if (perf && vb % 250u == 0) {
                         // Diagnostics: emulation speed over the last 250 frames (5 s of PAL game time)
                         static auto last = std::chrono::steady_clock::now();
@@ -724,9 +788,27 @@ int main(int argc, char** argv) {
                         if (vb >= p.at_vblank && vb < p.at_vblank + p.frames) pressed |= p.bits;
                     }
                     rt.set_pad_buttons(static_cast<u16>(~pressed));
+                    if (rumble_flag == 1) { // Diagnostics: print vibration changes
+                        static int last = -1;
+                        const int now_v = (rt.pad_motor_small() ? 256 : 0) | rt.pad_motor_large();
+                        if (now_v != last) {
+                            std::printf("[rumble] kare %u: kucuk=%d buyuk=%u\n", vb, rt.pad_motor_small() ? 1 : 0, rt.pad_motor_large());
+                            last = now_v;
+                        }
+                    }
                 });
             }
-            const u64 executed = rt.run(ctx, max_cycles);
+            u64 executed = 0;
+            while (!ctx.halted && executed < max_cycles) {
+                executed += rt.run(ctx, max_cycles - executed);
+                if (save_pending) {
+                    save_pending = false;
+                    const std::vector<u8> st = rt.save_state(ctx);
+                    std::ofstream out(save_state_path, std::ios::binary);
+                    out.write(reinterpret_cast<const char*>(st.data()), static_cast<std::streamsize>(st.size()));
+                    std::printf("[vs_host] Durum kaydedildi: kare %u, %zu bayt\n", rt.vblank_count(), st.size());
+                }
+            }
             std::printf("[vs_host] Cevrim: %llu | Son PC: 0x%08X | VBlank: %u | CD Sektor: %u (Son LBA: 0x%X) | GPU Primitif: %llu (%s %ux%u) | MDEC MB: %llu | SPU RAM: %llu B (KON: %llu, XA: %llu, Ses: %llu kare) | AOT Cagri: %llu\n",
                         static_cast<unsigned long long>(executed),
                         ctx.pc,
@@ -904,18 +986,71 @@ int main(int argc, char** argv) {
         }
     };
 
+    // Save states: files next to the memory card (slot 0 = automatic "continue" state)
+    const bool autosave_on = use_settings && settings.autosave && !hidden_window;
+    const bool rewind_on   = use_settings ? settings.rewind : false;
+    constexpr u32 REWIND_EVERY_VBLANKS       = 50; // One snapshot per second of PAL game time
+    constexpr std::size_t REWIND_MAX_STATES  = 30; // ~30 s, ~110 MB
+    std::deque<std::vector<u8>> rewind_states;
+    bool snapshot_due = false, rewinding = false, test_save_due = false;
+    const std::filesystem::path state_dir =
+        (memcard_path.empty() ? launcher::default_memcard_path() : std::filesystem::path(memcard_path)).parent_path();
+    const auto state_file = [&](int slot) {
+        return state_dir / (slot == 0 ? std::string("VagrantStory_devam.vss") : "VagrantStory_durum" + std::to_string(slot) + ".vss");
+    };
+    const auto save_state_file = [&](const std::filesystem::path& path, const std::string& what) {
+        const std::vector<u8> st = rt.save_state(ctx);
+        std::error_code ec;
+        std::filesystem::create_directories(path.parent_path(), ec);
+        std::ofstream out(path, std::ios::binary | std::ios::trunc);
+        out.write(reinterpret_cast<const char*>(st.data()), static_cast<std::streamsize>(st.size()));
+        const bool ok = static_cast<bool>(out);
+        host_log("%s: %s (%zu bayt)", what.c_str(), ok ? "kaydedildi" : "KAYDEDILEMEDI", st.size());
+        host_state.show_notice(hwnd, what + (ok ? " kaydedildi" : " KAYDEDILEMEDI"));
+        return ok;
+    };
+    const auto load_state_file = [&](const std::filesystem::path& path, const std::string& what) {
+        std::ifstream in(path, std::ios::binary);
+        if (!in) {
+            host_state.show_notice(hwnd, what + ": kayit yok");
+            return false;
+        }
+        std::vector<u8> data((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        const bool ok = rt.load_state(std::move(data), ctx);
+        host_log("%s: %s", what.c_str(), ok ? "yuklendi" : "YUKLENEMEDI (bozuk ya da eski surum)");
+        host_state.show_notice(hwnd, what + (ok ? " yuklendi" : " yuklenemedi"));
+        return ok;
+    };
+
     auto present_and_pump = [&]() {
         while (PeekMessageA(&msg, nullptr, 0, 0, PM_REMOVE)) {
             if (msg.message == WM_QUIT) {
                 host_log("Cikis mesaji alindi, emulasyon durduruluyor");
                 start_exit_watchdog();
-                running    = false;
-                ctx.halted = true;
+                running = false;
+                // Not ctx.halted: run() returns at a clean point, so the state can still be saved
+                rt.request_break();
             }
             TranslateMessage(&msg);
             DispatchMessageA(&msg);
         }
         if (!running) return;
+
+        // Title notice expired -> normal title
+        if (!host_state.notice.empty() && GetTickCount64() >= host_state.notice_until) {
+            host_state.notice.clear();
+            host_state.update_window_title(hwnd);
+        }
+        // Save state requests for the main loop
+        const u32 vb_now = rt.vblank_count();
+        if (save_state_vblank != 0 && vb_now == save_state_vblank) { test_save_due = true; rt.request_break(); }
+        rewinding = rewind_on && !hidden_window && GetForegroundWindow() == hwnd && (GetAsyncKeyState(VK_F8) & 0x8000) != 0;
+        if (rewinding) {
+            rt.request_break();
+        } else if (rewind_on && vb_now % REWIND_EVERY_VBLANKS == 0) {
+            snapshot_due = true;
+            rt.request_break();
+        }
 
         // Keyboard (only while the game window has focus) + gamepads, merged as active-high
         // PS1 bits, then inverted to the pad's active-low format
@@ -936,6 +1071,7 @@ int main(int argc, char** argv) {
             }
         }
         rt.set_pad_buttons(static_cast<u16>(~pressed));
+        if (rumble_on && !hidden_window) gamepad.set_rumble(rt.pad_motor_small(), rt.pad_motor_large());
 
         // Stream synthesized PS1 SPU 44.1 kHz Stereo PCM to Windows audio ring buffer
         audio.pump_from_spu(rt.spu());
@@ -993,8 +1129,41 @@ int main(int argc, char** argv) {
     } else {
         host_log("Emulasyon basladi");
         rt.set_vblank_callback(present_and_pump);
-        while (running && !ctx.halted) {
+        if (!load_state_path.empty()) {
+            load_state_file(load_state_path, "Test durumu");
+        } else if (autosave_on && std::filesystem::exists(state_file(0))) {
+            load_state_file(state_file(0), "Kaldiginiz yerden devam");
+        }
+        while (!ctx.halted) {
             rt.run(ctx, 0x00FF'FFFF'FFFF'FFFFull);
+            if (ctx.halted) break;
+            if (!running) {
+                // Quitting, stopped at a clean point: keep the state for "continue where you left off"
+                if (autosave_on) save_state_file(state_file(0), "Otomatik kayit");
+                break;
+            }
+            if (test_save_due) {
+                test_save_due = false;
+                save_state_file(save_state_path, "Test durumu");
+            }
+            if (host_state.state_op == Win32HostState::OP_SAVE) {
+                save_state_file(state_file(host_state.state_slot), "Durum " + std::to_string(host_state.state_slot));
+            } else if (host_state.state_op == Win32HostState::OP_LOAD) {
+                load_state_file(state_file(host_state.state_slot), "Durum " + std::to_string(host_state.state_slot));
+            }
+            host_state.state_op = Win32HostState::OP_NONE;
+            if (snapshot_due) {
+                snapshot_due = false;
+                rewind_states.push_back(rt.save_state(ctx));
+                if (rewind_states.size() > REWIND_MAX_STATES) rewind_states.pop_front();
+            }
+            if (rewinding && !rewind_states.empty()) {
+                // One step back per ~120 ms while F8 is held; the oldest state stays
+                std::vector<u8> st = rewind_states.back();
+                if (rewind_states.size() > 1) rewind_states.pop_back();
+                if (rt.load_state(std::move(st), ctx)) host_state.show_notice(hwnd, "Geri sariliyor");
+                Sleep(120);
+            }
         }
         host_log(running ? "Emulasyon durdu (islemci durdu), pencere acik" : "Emulasyon durdu");
         while (running) {
@@ -1011,6 +1180,7 @@ int main(int argc, char** argv) {
         launcher::save_settings(launcher::settings_path(), settings);
         host_log("Ayarlar kaydedildi");
     }
+    gamepad.set_rumble(false, 0);
     // Shut down step by step (a hang shows in the log); the rest goes when main returns
     audio.shutdown();
     host_log("Ses kapatildi");

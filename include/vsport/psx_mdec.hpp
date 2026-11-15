@@ -8,6 +8,8 @@
 
 namespace vsport {
 
+class StateIO;
+
 // PlayStation 1 Hardware Macroblock Decoder (MDEC — 0x1F801820 / 0x1F801824, DMA0 In / DMA1 Out)
 class PsxMdec {
 public:
@@ -29,6 +31,9 @@ public:
     }
     [[nodiscard]] u64 macroblocks_decoded() const noexcept { return macroblocks_decoded_; }
     [[nodiscard]] u64 commands_executed() const noexcept { return commands_executed_; }
+
+    // Save state: writes or reads the whole state (see state_io.hpp)
+    void serialize(StateIO& io);
 
 private:
     void init_default_tables() noexcept;

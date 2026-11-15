@@ -46,6 +46,10 @@ struct GameSettings {
     bool widescreen     = false;  // Widen the 3D view to the aspect ratio (GTE projection hack)
     bool muted          = false;
     int  volume         = 100;    // 0..100
+    int  cpu_overclock  = 100;    // Emulated CPU speed in percent (100 = original)
+    bool autosave       = false;  // Save the machine state on exit and continue from it on the next start
+    bool rewind         = false;  // Keep ~30 s of states in memory; hold F8 to rewind
+    bool rumble         = true;   // DualShock vibration (XInput controllers)
     bool show_launcher  = true;   // Show this window on every start (Shift forces it)
     pad::ButtonMap pad_map = pad::default_button_map(); // Controller button remap
 };

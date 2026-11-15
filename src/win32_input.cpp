@@ -65,6 +65,7 @@ struct Win32GamepadInput::Impl {
     // XInput
     std::array<bool, XUSER_MAX_COUNT> xi_connected{};
     std::array<ULONGLONG, XUSER_MAX_COUNT> xi_next_probe{};
+    WORD rumble_left = 0, rumble_right = 0; // Last vibration sent
 
     // DirectInput (first non-XInput game controller)
     IDirectInput8W* di = nullptr;
@@ -201,6 +202,7 @@ bool Win32GamepadInput::initialize(void* hwnd) {
 
 void Win32GamepadInput::shutdown() {
     if (!impl_) return;
+    set_rumble(false, 0); // Never leave a controller vibrating
     if (impl_->di_dev) {
         impl_->di_dev->Unacquire();
         impl_->di_dev->Release();
@@ -217,6 +219,19 @@ u16 Win32GamepadInput::poll() {
     return pad::apply_button_map(static_cast<u16>(impl_->poll_xinput(now) | impl_->poll_dinput(now)), map_);
 }
 
+void Win32GamepadInput::set_rumble(bool small_motor, u8 large_motor) {
+    if (!impl_) return;
+    // XInput: left = heavy low-frequency motor (PS1 large), right = light high-frequency (PS1 small)
+    const WORD left = static_cast<WORD>(large_motor * 257u), right = small_motor ? WORD{40000} : WORD{0};
+    if (left == impl_->rumble_left && right == impl_->rumble_right) return;
+    impl_->rumble_left  = left;
+    impl_->rumble_right = right;
+    XINPUT_VIBRATION v{left, right};
+    for (DWORD slot = 0; slot < XUSER_MAX_COUNT; ++slot) {
+        if (impl_->xi_connected[slot]) XInputSetState(slot, &v);
+    }
+}
+
 } // namespace vsport
 
 #else // !_WIN32
@@ -228,6 +243,7 @@ Win32GamepadInput::~Win32GamepadInput() = default;
 bool Win32GamepadInput::initialize(void*) { return false; }
 void Win32GamepadInput::shutdown() {}
 u16 Win32GamepadInput::poll() { return 0; }
+void Win32GamepadInput::set_rumble(bool, u8) {}
 } // namespace vsport
 
 #endif

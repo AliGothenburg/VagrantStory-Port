@@ -9,6 +9,8 @@
 
 namespace vsport {
 
+class StateIO;
+
 class PsxSpu;
 
 // PlayStation 1 CD-ROM Controller (Ports 0x1F801800..0x1F801803 + DMA3 Data FIFO)
@@ -33,6 +35,9 @@ public:
     [[nodiscard]] u32 sectors_read() const noexcept { return sectors_read_; }
     [[nodiscard]] u32 last_read_lba() const noexcept { return last_read_lba_; }
     [[nodiscard]] const std::string& debug_log() const noexcept { return debug_log_; }
+
+    // Save state: writes or reads the whole state (see state_io.hpp)
+    void serialize(StateIO& io);
 
 private:
     struct QueuedResponse {

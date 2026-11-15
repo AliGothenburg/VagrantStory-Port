@@ -697,6 +697,40 @@ void test_gpu_perspective_textures() {
     CHECK(persp.read_vram_pixel(60, 10) == affine.read_vram_pixel(60, 10), "Native picture is unchanged");
 }
 
+// Save state: loading brings memory, CPU and video memory back; a damaged file changes nothing
+void test_save_state_round_trip() {
+    PsxRuntime rt;
+    CpuContext ctx{};
+    rt.write32(0x80010000u, 0x11223344u);
+    ctx.set_reg(5, 0xCAFEBABEu);
+    ctx.pc = 0x80012340u;
+    rt.gpu().write_gp0(0x02FFFFFFu); // Fill (0,0) 16x16 white
+    rt.gpu().write_gp0(0u);
+    rt.gpu().write_gp0((16u << 16) | 16u);
+    std::vector<u8> st = rt.save_state(ctx);
+    CHECK(st.size() > PSX_RAM_SIZE_2MB, "State holds at least the RAM");
+
+    rt.write32(0x80010000u, 0xDEADBEEFu);
+    ctx.set_reg(5, 1u);
+    ctx.pc = 0x80000000u;
+    rt.gpu().write_gp0(0x02000000u); // Fill black
+    rt.gpu().write_gp0(0u);
+    rt.gpu().write_gp0((16u << 16) | 16u);
+    CHECK(rt.load_state(st, ctx), "State loads");
+    CHECK(rt.read32(0x80010000u) == 0x11223344u, "RAM restored");
+    CHECK(ctx.get_reg(5) == 0xCAFEBABEu && ctx.pc == 0x80012340u, "CPU registers restored");
+    CHECK(rt.gpu().read_vram_pixel(3, 3) == 0x7FFFu, "VRAM restored");
+
+    std::vector<u8> bad = st;
+    bad.resize(bad.size() / 2);
+    rt.write32(0x80010000u, 0x55667788u);
+    CHECK(!rt.load_state(bad, ctx), "Truncated state is rejected");
+    CHECK(rt.read32(0x80010000u) == 0x55667788u, "A rejected state leaves the machine as it was");
+    std::vector<u8> wrong = st;
+    wrong[0] ^= 0xFFu;
+    CHECK(!rt.load_state(wrong, ctx), "Foreign file is rejected");
+}
+
 // GP1(03h) display off: the picture must be black (the game hides VRAM set-up before movies)
 void test_gpu_display_off_is_black() {
     PsxGpu gpu;
@@ -1075,6 +1109,7 @@ int main() {
     test_gpu_mask_bit_and_self_texturing_sprite();
     test_gpu_exact_vertex_positions();
     test_gpu_perspective_textures();
+    test_save_state_round_trip();
     test_gpu_display_off_is_black();
     test_gpu_otc_and_dma_linked_list();
     test_interpreter_and_lifter_pipeline();

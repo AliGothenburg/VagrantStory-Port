@@ -9,6 +9,8 @@
 
 namespace vsport {
 
+class StateIO;
+
 // PlayStation 1 SPU (24-Voice Sony 4-bit ADPCM Hardware Synthesizer + 512 KB Sound RAM + DMA4)
 class PsxSpu {
 public:
@@ -47,6 +49,9 @@ public:
     [[nodiscard]] u64 frames_rendered() const noexcept { return frames_rendered_; }
     [[nodiscard]] std::size_t buffered_frames() const noexcept { return pcm_fifo_.size() / 2u; }
     [[nodiscard]] const std::vector<u8>& sound_ram() const noexcept { return ram_; }
+
+    // Save state: writes or reads the whole state (see state_io.hpp)
+    void serialize(StateIO& io);
 
 private:
     enum class EnvPhase : u8 {

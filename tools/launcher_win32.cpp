@@ -77,6 +77,10 @@ GameSettings load_settings(const std::filesystem::path& ini) {
         else if (key == "muted")         s.muted = num != 0;
         else if (key == "volume")        s.volume = clamp_int(num, 0, 100);
         else if (key == "show_launcher") s.show_launcher = num != 0;
+        else if (key == "rumble")        s.rumble = num != 0;
+        else if (key == "autosave")      s.autosave = num != 0;
+        else if (key == "rewind")        s.rewind = num != 0;
+        else if (key == "cpu_overclock") s.cpu_overclock = clamp_int(num, 100, 400);
         else if (key.rfind("pad_", 0) == 0) {
             const int target = pad::remap_index_from_name(key.substr(4));
             const int source = pad::remap_index_from_name(val);
@@ -114,6 +118,13 @@ void save_settings(const std::filesystem::path& ini, const GameSettings& s) {
     out << "muted=" << (s.muted ? 1 : 0) << "\n";
     out << "volume=" << s.volume << "\n";
     out << "show_launcher=" << (s.show_launcher ? 1 : 0) << "\n";
+    out << "# rumble: titresim (DualShock; XInput kontrolculer)\n";
+    out << "rumble=" << (s.rumble ? 1 : 0) << "\n";
+    out << "# autosave: cikarken durumu kaydet, acilista kaldigin yerden devam et; rewind: F8 ile geri sarma\n";
+    out << "autosave=" << (s.autosave ? 1 : 0) << "\n";
+    out << "rewind=" << (s.rewind ? 1 : 0) << "\n";
+    out << "# cpu_overclock: emule edilen islemci hizi, yuzde (100 = orijinal)\n";
+    out << "cpu_overclock=" << s.cpu_overclock << "\n";
     out << "# Kontrolcu tuslari: pad_<PS1 tusu>=<kontrolcude o konumdaki tus> (none = atanmamis)\n";
     for (std::size_t i = 0; i < pad::REMAP_COUNT; ++i) {
         const int src = s.pad_map[i];
@@ -222,15 +233,16 @@ enum ControlId : int {
     ID_RES_COMBO, ID_TEXFILTER_CHECK,
     ID_CARD_EDIT, ID_CARD_CHANGE, ID_CARD_OPEN,
     ID_MUTE_CHECK, ID_VOLUME_SLIDER, ID_VOLUME_LABEL,
-    ID_SHOW_CHECK, ID_ASPECT_COMBO, ID_RIM_COMBO, ID_PGXP_COMBO, ID_RENDERER_COMBO, ID_GPU_COMBO,
+    ID_SHOW_CHECK, ID_ASPECT_COMBO, ID_RIM_COMBO, ID_PGXP_COMBO, ID_RENDERER_COMBO, ID_GPU_COMBO, ID_RUMBLE_CHECK, ID_OVERCLOCK_COMBO, ID_AUTOSAVE_CHECK, ID_REWIND_CHECK,
     ID_PAD_COMBO0 = 300, // .. ID_PAD_COMBO0 + REMAP_COUNT - 1
     ID_PAD_DEFAULTS = 400,
     ID_NAV0 = 500,       // .. ID_NAV0 + PAGE_COUNT - 1: page buttons on the left
 };
 
 // Pages of the settings window (buttons on the left). A new group of settings = a new page.
-enum Page : int { PAGE_GAME, PAGE_GRAPHICS, PAGE_DISPLAY, PAGE_SOUND, PAGE_CONTROLS, PAGE_COUNT };
-constexpr const wchar_t* PAGE_NAMES[PAGE_COUNT] = {L"Oyun", L"Grafik", L"Ekran", L"Ses", L"Kontroller"};
+enum Page : int { PAGE_GAME, PAGE_GRAPHICS, PAGE_DISPLAY, PAGE_SOUND, PAGE_CONTROLS, PAGE_ADVANCED, PAGE_COUNT };
+constexpr const wchar_t* PAGE_NAMES[PAGE_COUNT] = {L"Oyun", L"Grafik", L"Ekran", L"Ses", L"Kontroller", L"Gelişmiş"};
+constexpr int OVERCLOCK_VALUES[] = {100, 150, 200, 300};
 
 // Layout (logical px): title on top, page buttons on the left, the page on the right, footer below
 constexpr int WIN_W = 760, WIN_H = 470;
@@ -511,7 +523,31 @@ void build_controls(LauncherState& st) {
     }
     y += PAD_ROWS * 32 + 8;
     make(st, L"BUTTON", L"Varsayılana döndür", BS_PUSHBUTTON | tab, LX, y, 150, 28, ID_PAD_DEFAULTS);
+    add_check(st, L"Titreşim (Xbox / XInput uyumlu kontrolcüler)", LX + 180, y + 4, IW - 180, 20, ID_RUMBLE_CHECK, s.rumble);
     pad_select(st, s.pad_map);
+
+    // --- Gelişmiş: emulation tweaks ---
+    y = begin_page(PAGE_ADVANCED);
+    label(L"İşlemci hızı:", y);
+    {
+        int sel = 0;
+        for (int i = 0; i < 4; ++i) if (s.cpu_overclock >= OVERCLOCK_VALUES[i]) sel = i;
+        add_combo(st, CX, y, CW, ID_OVERCLOCK_COMBO, {L"Orijinal (%100)", L"%150", L"%200", L"%300"}, sel);
+    }
+    y += 30;
+    make(st, L"STATIC", L"Emüle edilen PS1 işlemcisini hızlandırır: oyunun kalabalık sahnelerdeki kendi "
+                        L"yavaşlamaları azalır. Oyun hızlanmaz; bilgisayarın işlemcisi daha çok çalışır.",
+         SS_LEFT, LX, y, IW, 36, 0);
+
+    y += 52;
+    make(st, L"STATIC", L"Anlık kayıt (oyunun kendi kayıt noktalarından bağımsız):  F5 kaydet,  F7 yükle,  "
+                        L"F6 kayıt yuvasını değiştir (1–5).",
+         SS_LEFT, LX, y, IW, 36, 0);
+    y += 42;
+    add_check(st, L"Çıkarken durumu kaydet, açılışta kaldığım yerden devam et", LX, y, IW, 20, ID_AUTOSAVE_CHECK, s.autosave);
+    y += 28;
+    add_check(st, L"Geri sarma: F8 basılı tutulunca son ~30 saniye geri sarılır (~110 MB bellek)", LX, y, IW, 20,
+              ID_REWIND_CHECK, s.rewind);
 
     // --- Footer (always visible) ---
     st.building_page = -1;
@@ -546,6 +582,10 @@ void read_controls(LauncherState& st) {
     s.muted         = SendMessageW(item(st, ID_MUTE_CHECK), BM_GETCHECK, 0, 0) == BST_CHECKED;
     s.volume        = clamp_int(static_cast<int>(SendMessageW(item(st, ID_VOLUME_SLIDER), TBM_GETPOS, 0, 0)), 0, 100);
     s.show_launcher = SendMessageW(item(st, ID_SHOW_CHECK), BM_GETCHECK, 0, 0) == BST_CHECKED;
+    s.rumble        = SendMessageW(item(st, ID_RUMBLE_CHECK), BM_GETCHECK, 0, 0) == BST_CHECKED;
+    s.autosave      = SendMessageW(item(st, ID_AUTOSAVE_CHECK), BM_GETCHECK, 0, 0) == BST_CHECKED;
+    s.rewind        = SendMessageW(item(st, ID_REWIND_CHECK), BM_GETCHECK, 0, 0) == BST_CHECKED;
+    s.cpu_overclock = OVERCLOCK_VALUES[clamp_int(static_cast<int>(SendMessageW(item(st, ID_OVERCLOCK_COMBO), CB_GETCURSEL, 0, 0)), 0, 3)];
     for (std::size_t i = 0; i < pad::REMAP_COUNT; ++i) {
         const auto sel = SendMessageW(item(st, ID_PAD_COMBO0 + static_cast<int>(i)), CB_GETCURSEL, 0, 0);
         s.pad_map[i] = static_cast<s8>(sel <= 0 ? -1 : sel - 1);

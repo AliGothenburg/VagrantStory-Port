@@ -12,6 +12,8 @@
 
 namespace vsport {
 
+class StateIO;
+
 // PlayStation 1 GPU (1024x512 16-bit RGB555 VRAM + GP0/GP1 command FIFO & software rasterizer)
 class PsxGpu {
 public:
@@ -90,6 +92,9 @@ public:
 
     // Saves VRAM or active display to a PPM image file
     bool dump_ppm(const std::filesystem::path& path, bool full_vram = true) const;
+
+    // Save state: writes or reads the whole state (see state_io.hpp)
+    void serialize(StateIO& io);
 
 private:
     using Vertex = GpuVertex;

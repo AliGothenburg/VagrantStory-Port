@@ -36,6 +36,7 @@ public:
     [[nodiscard]] bool enabled() const noexcept { return enabled_; }
 
     // Called once per vblank
+    void clear() { map_.clear(); }
     void begin_frame() {
         ++frame_;
         if (map_.size() > 200000u) {

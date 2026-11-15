@@ -17,6 +17,7 @@ option(VSPORT_LINK_AOT "Compile and link generated C++20 AOT modules into vs_hos
 add_library(vsport_core STATIC
     src/cdrom_iso.cpp
     src/psx_cdrom.cpp
+    src/savestate.cpp
     src/psx_exe.cpp
     src/mips_decoder.cpp
     src/gte.cpp

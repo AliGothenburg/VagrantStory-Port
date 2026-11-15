@@ -61,6 +61,15 @@ tıklamak yeterlidir (konsol penceresi açılmaz):
     (ör. 16:9 monitörde 16:9) ya da "doldur"u kullanın. Tam sayı ölçekleme yalnızca 1× iç
     çözünürlükte uygulanır.
   - **Ses:** sesi kapatma ve ses seviyesi.
+  - **Titreşim:** oyun DualShock titreşimini kullanır; Xbox / XInput uyumlu kontrolcülerde çalışır
+    (Kontroller sayfasından kapatılabilir; DirectInput kontrolcülerde henüz yok).
+  - **Anlık kayıt:** oyunun kayıt noktalarından bağımsız olarak **F5** kaydeder, **F7** yükler, **F6** kayıt
+    yuvasını değiştirir (1–5; dosyalar hafıza kartının yanında, `VagrantStory_durumN.vss`). Hafıza kartı
+    anlık kayda dahil değildir: bir durumu yüklemek kartta yapılmış kayıtları geri almaz.
+    Gelişmiş sayfasında iki seçenek daha var: **çıkarken durumu kaydedip açılışta kaldığın yerden devam**
+    ve **geri sarma** (F8 basılı tutulunca son ~30 saniye; ~110 MB bellek).
+  - **Gelişmiş › İşlemci hızı:** emüle edilen PS1 işlemcisini %150–%300 hızlandırır; oyunun
+    kalabalık sahnelerdeki kendi yavaşlamaları azalır (oyun hızlanmaz). Yüklemeler de kısalır.
   - **Kontroller:** her PS1 tuşunun (×, ○, □, △, L1/R1, L2/R2, START, SELECT, L3/R3)
     kontrolcüde hangi tuşa basılınca çalışacağını seçin; "Varsayılana döndür" konuma göre
     eşlemeye geri döner. Yön tuşları ve sol çubuk sabittir; klavye tuşları değişmez.
