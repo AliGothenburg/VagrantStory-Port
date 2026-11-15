@@ -86,6 +86,7 @@ GameSettings load_settings(const std::filesystem::path& ini) {
         else if (key == "texture_pack")  s.texture_pack = num != 0;
         else if (key == "frame_interp")  s.frame_interp = num != 0;
         else if (key == "runahead")      s.runahead = clamp_int(num, 0, 3);
+        else if (key == "pal60")         s.pal60 = num != 0;
         else if (key == "ra_enabled")    s.ra_enabled = num != 0;
         else if (key == "ra_user")       s.ra_user = val;
         else if (key == "ra_token")      s.ra_token = val;
@@ -146,6 +147,8 @@ void save_settings(const std::filesystem::path& ini, const GameSettings& s) {
     out << "frame_interp=" << (s.frame_interp ? 1 : 0) << "\n";
     out << "# runahead: gecikme azaltma, ileri calistirilan kare sayisi (0-3)\n";
     out << "runahead=" << s.runahead << "\n";
+    out << "# pal60: Avrupa (PAL) diskini 60 Hz'de, ABD surumu hizinda calistir\n";
+    out << "pal60=" << (s.pal60 ? 1 : 0) << "\n";
     out << "# RetroAchievements: kullanici adi ve sunucunun verdigi oturum anahtari (sifre saklanmaz)\n";
     out << "ra_enabled=" << (s.ra_enabled ? 1 : 0) << "\n";
     out << "ra_user=" << s.ra_user << "\n";
@@ -261,7 +264,7 @@ enum ControlId : int {
     ID_RES_COMBO, ID_TEXFILTER_CHECK,
     ID_CARD_EDIT, ID_CARD_CHANGE, ID_CARD_OPEN,
     ID_MUTE_CHECK, ID_VOLUME_SLIDER, ID_VOLUME_LABEL,
-    ID_SHOW_CHECK, ID_ASPECT_COMBO, ID_RIM_COMBO, ID_PGXP_COMBO, ID_RENDERER_COMBO, ID_GPU_COMBO, ID_RUMBLE_CHECK, ID_OVERCLOCK_COMBO, ID_AUTOSAVE_CHECK, ID_REWIND_CHECK, ID_CHEATS_CHECK, ID_CHEATS_OPEN, ID_REVERB_CHECK, ID_CUBIC_CHECK, ID_TEXPACK_CHECK, ID_TEXPACK_OPEN, ID_TEXDUMP_CHECK, ID_INTERP_CHECK, ID_RUNAHEAD_COMBO, ID_RA_CHECK, ID_RA_USER, ID_RA_PASS, ID_RA_LOGIN, ID_RA_LOGOUT, ID_RA_STATUS,
+    ID_SHOW_CHECK, ID_ASPECT_COMBO, ID_RIM_COMBO, ID_PGXP_COMBO, ID_RENDERER_COMBO, ID_GPU_COMBO, ID_RUMBLE_CHECK, ID_OVERCLOCK_COMBO, ID_AUTOSAVE_CHECK, ID_REWIND_CHECK, ID_CHEATS_CHECK, ID_CHEATS_OPEN, ID_REVERB_CHECK, ID_CUBIC_CHECK, ID_TEXPACK_CHECK, ID_TEXPACK_OPEN, ID_TEXDUMP_CHECK, ID_INTERP_CHECK, ID_RUNAHEAD_COMBO, ID_RA_CHECK, ID_RA_USER, ID_RA_PASS, ID_RA_LOGIN, ID_RA_LOGOUT, ID_RA_STATUS, ID_PAL60_CHECK,
     ID_PAD_COMBO0 = 300, // .. ID_PAD_COMBO0 + REMAP_COUNT - 1
     ID_PAD_DEFAULTS = 400,
     ID_NAV0 = 500,       // .. ID_NAV0 + PAGE_COUNT - 1: page buttons on the left
@@ -549,6 +552,10 @@ void build_controls(LauncherState& st) {
     add_check(st, L"3D sahneyi orana göre genişlet (kapalıysa görüntü esnetilir;\n"
                   L"2D yazılar ve göstergeler yatayda esner)",
               LX, y, IW, 36, ID_WIDE_CHECK, s.widescreen, BS_MULTILINE);
+    y += 46;
+    add_check(st, L"Avrupa (PAL) diskini 60 Hz'de çalıştır: oyun ABD sürümü hızında akar\n"
+                  L"(PAL sürümü normalde ~%17 yavaştır; müzik temposu değişmez)",
+              LX, y, IW, 36, ID_PAL60_CHECK, s.pal60, BS_MULTILINE);
 
     // --- Ses ---
     y = begin_page(PAGE_SOUND);
@@ -689,6 +696,7 @@ void read_controls(LauncherState& st) {
     s.autosave      = SendMessageW(item(st, ID_AUTOSAVE_CHECK), BM_GETCHECK, 0, 0) == BST_CHECKED;
     s.cheats        = SendMessageW(item(st, ID_CHEATS_CHECK), BM_GETCHECK, 0, 0) == BST_CHECKED;
     s.texture_pack  = SendMessageW(item(st, ID_TEXPACK_CHECK), BM_GETCHECK, 0, 0) == BST_CHECKED;
+    s.pal60         = SendMessageW(item(st, ID_PAL60_CHECK), BM_GETCHECK, 0, 0) == BST_CHECKED;
     s.frame_interp  = SendMessageW(item(st, ID_INTERP_CHECK), BM_GETCHECK, 0, 0) == BST_CHECKED;
     s.texture_dump  = SendMessageW(item(st, ID_TEXDUMP_CHECK), BM_GETCHECK, 0, 0) == BST_CHECKED;
     s.reverb        = SendMessageW(item(st, ID_REVERB_CHECK), BM_GETCHECK, 0, 0) == BST_CHECKED;

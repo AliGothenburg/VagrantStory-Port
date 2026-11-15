@@ -52,6 +52,8 @@ public:
     [[nodiscard]] void* device_handle() const noexcept;
     // Diagnostics: the next present_vram() saves the finished window picture to a PPM file
     void request_backbuffer_dump(const std::string& path) { dump_path_ = path; }
+    // Short message drawn over the picture at the bottom centre (also in fullscreen); empty = none
+    void set_overlay_text(const std::wstring& text);
 
 private:
     struct Impl;

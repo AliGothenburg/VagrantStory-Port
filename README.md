@@ -115,6 +115,12 @@ tıklamak yeterlidir (konsol penceresi açılmaz):
   - **ABD sürümü:** SLUS-01040 diski de çalışır (60 Hz, `.sbi` gerekmez). Derlenmiş oyun kodu Avrupa
     sürümünden üretildiği için ABD sürümü yorumlayıcıyla çalışır: 4× ekran kartı çiziminde
     saniyede 84–103 kare (gereken 60). Gecikme azaltma bu sürümde gerçek zamana yetişmez.
+  - **PAL 60 Hz (Ekran sayfası):** Avrupa sürümü 50 Hz'de saniyede 25 kare çalışır ve bu yüzden ABD
+    sürümünden (60 Hz, saniyede 30 kare) ~%17 yavaştır; bu orijinal davranıştır. Açıkken PAL disk 60 Hz
+    hızında çalıştırılır ve oyun ABD sürümü hızında akar. Müzik ve yazı hızı zamanlayıcıyla çalıştığı
+    için değişmez (ölçüldü). Komut satırı: `--pal60 0/1`.
+  - **Bildirimler:** anlık kayıt, geri sarma ve başarım bildirimleri pencere başlığının yanı sıra
+    görüntünün alt ortasında yarı saydam bir kutuda gösterilir; tam ekranda da görünür.
   - **Videoları geçme:** oyun açılış videosunu START ile kendisi geçirir; diğer sahnelerde **Tab** hızlı ileri sarar.
   - **Kenar yumuşatma (süper örnekleme):** iç çözünürlük pencereden büyükse görüntü, her ekran pikseli
     kapladığı piksellerin ortalaması alınarak küçültülür; poligon kenarlarındaki tırtıklar yumuşar.

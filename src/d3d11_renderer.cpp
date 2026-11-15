@@ -49,6 +49,7 @@ cbuffer DisplayCB : register(b0) {
 Texture2D<uint> VramTex : register(t0);
 Texture2D<uint> HrTex   : register(t1);
 Texture2D<float4> HrRgba : register(t2);
+Texture2D<float4> Overlay : register(t3); // Notice text (premultiplied alpha)
 
 struct VSOut {
     float4 pos : SV_POSITION;
@@ -60,6 +61,13 @@ VSOut VSMain(uint vid : SV_VertexID) {
     o.uv  = float2((vid << 1) & 2, vid & 2);
     o.pos = float4(o.uv * float2(2.0f, -2.0f) + float2(-1.0f, 1.0f), 0.0f, 1.0f);
     return o;
+}
+
+// Notice overlay: the triangle covers the overlay's viewport, uv 0..1 = the text texture
+float4 PSOverlay(VSOut i) : SV_Target {
+    uint w, h;
+    Overlay.GetDimensions(w, h);
+    return Overlay.Load(int3(min(uint2(i.uv * float2(w, h)), uint2(w - 1u, h - 1u)), 0));
 }
 
 float3 ReadVram15(int x, int y) {
@@ -216,6 +224,71 @@ struct D3D11Renderer::Impl {
     }
     ComPtr<ID3D11VertexShader>     vs;
     ComPtr<ID3D11PixelShader>      ps;
+    // Notice overlay
+    ComPtr<ID3D11PixelShader>      ps_overlay;
+    ComPtr<ID3D11BlendState>       blend_premul;
+    ComPtr<ID3D11Texture2D>        overlay_tex;
+    ComPtr<ID3D11ShaderResourceView> overlay_srv;
+    std::wstring overlay_text;
+    u32 overlay_w = 0, overlay_h = 0, overlay_for_h = 0; // Texture size; backbuffer height it was made for
+
+    // Renders the notice with GDI (grey-scale antialiasing) into a premultiplied-alpha texture
+    bool build_overlay(u32 screen_h) {
+        overlay_tex.Reset();
+        overlay_srv.Reset();
+        overlay_for_h = screen_h;
+        if (overlay_text.empty()) return false;
+        const int font_px = std::max(16, static_cast<int>(screen_h) / 30);
+        const int pad = font_px / 2;
+        HDC dc = CreateCompatibleDC(nullptr);
+        HFONT font = CreateFontW(-font_px, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                                 CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+        HGDIOBJ old_font = SelectObject(dc, font);
+        RECT tr{0, 0, 0, 0};
+        DrawTextW(dc, overlay_text.c_str(), -1, &tr, DT_CALCRECT | DT_NOPREFIX | DT_SINGLELINE);
+        const int w = tr.right + 2 * pad, h = tr.bottom + 2 * pad;
+        BITMAPINFO bi{};
+        bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
+        bi.bmiHeader.biWidth = w;
+        bi.bmiHeader.biHeight = -h; // Top-down
+        bi.bmiHeader.biPlanes = 1;
+        bi.bmiHeader.biBitCount = 32;
+        void* bits = nullptr;
+        HBITMAP bmp = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+        bool ok = false;
+        if (bmp && bits) {
+            HGDIOBJ old_bmp = SelectObject(dc, bmp);
+            std::memset(bits, 0, static_cast<std::size_t>(w) * h * 4u);
+            SetBkMode(dc, TRANSPARENT);
+            SetTextColor(dc, RGB(255, 255, 255));
+            RECT dr{pad, pad, w - pad, h - pad};
+            DrawTextW(dc, overlay_text.c_str(), -1, &dr, DT_NOPREFIX | DT_SINGLELINE);
+            GdiFlush();
+            // White text over a dark, partly transparent box (premultiplied: rgb = coverage)
+            auto* px = static_cast<u32*>(bits);
+            for (int i = 0; i < w * h; ++i) {
+                const u32 cov = px[i] & 0xFFu;
+                const u32 a = cov + ((255u - cov) * 170u) / 255u;
+                px[i] = cov | (cov << 8) | (cov << 16) | (a << 24);
+            }
+            D3D11_TEXTURE2D_DESC td{};
+            td.Width = static_cast<UINT>(w); td.Height = static_cast<UINT>(h);
+            td.MipLevels = 1; td.ArraySize = 1;
+            td.Format = DXGI_FORMAT_R8G8B8A8_UNORM; td.SampleDesc.Count = 1;
+            td.Usage = D3D11_USAGE_IMMUTABLE; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+            D3D11_SUBRESOURCE_DATA init{bits, static_cast<UINT>(w) * 4u, 0};
+            ok = SUCCEEDED(device->CreateTexture2D(&td, &init, &overlay_tex)) &&
+                 SUCCEEDED(device->CreateShaderResourceView(overlay_tex.Get(), nullptr, &overlay_srv));
+            overlay_w = static_cast<u32>(w);
+            overlay_h = static_cast<u32>(h);
+            SelectObject(dc, old_bmp);
+            DeleteObject(bmp);
+        }
+        SelectObject(dc, old_font);
+        DeleteObject(font);
+        DeleteDC(dc);
+        return ok;
+    }
     ComPtr<ID3D11Buffer>           cbuffer;
     u32 backbuf_w = 0;
     u32 backbuf_h = 0;
@@ -377,6 +450,27 @@ bool D3D11Renderer::initialize(HWND hwnd, u32 width, u32 height, std::string* er
         return false;
     }
 
+    {
+        // Notice overlay: its own pixel shader and premultiplied-alpha blending
+        ComPtr<ID3DBlob> ov_blob;
+        D3D11_BLEND_DESC bd{};
+        bd.RenderTarget[0].BlendEnable           = TRUE;
+        bd.RenderTarget[0].SrcBlend              = D3D11_BLEND_ONE;
+        bd.RenderTarget[0].DestBlend             = D3D11_BLEND_INV_SRC_ALPHA;
+        bd.RenderTarget[0].BlendOp               = D3D11_BLEND_OP_ADD;
+        bd.RenderTarget[0].SrcBlendAlpha         = D3D11_BLEND_ONE;
+        bd.RenderTarget[0].DestBlendAlpha        = D3D11_BLEND_INV_SRC_ALPHA;
+        bd.RenderTarget[0].BlendOpAlpha          = D3D11_BLEND_OP_ADD;
+        bd.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+        if (FAILED(D3DCompile(kVramHlslSource, std::strlen(kVramHlslSource), "vram.hlsl", nullptr, nullptr, "PSOverlay", "ps_4_0",
+                              D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &ov_blob, nullptr)) ||
+            FAILED(impl_->device->CreatePixelShader(ov_blob->GetBufferPointer(), ov_blob->GetBufferSize(), nullptr, &impl_->ps_overlay)) ||
+            FAILED(impl_->device->CreateBlendState(&bd, &impl_->blend_premul))) {
+            impl_->ps_overlay.Reset(); // No notices on screen; the game still runs
+            impl_->blend_premul.Reset();
+        }
+    }
+
     D3D11_BUFFER_DESC cbd{};
     cbd.ByteWidth      = sizeof(DisplayConstants);
     cbd.Usage          = D3D11_USAGE_DYNAMIC;
@@ -394,6 +488,17 @@ bool D3D11Renderer::initialize(HWND hwnd, u32 width, u32 height, std::string* er
     return true;
 }
 #endif
+
+void D3D11Renderer::set_overlay_text(const std::wstring& text) {
+#ifdef _WIN32
+    if (!impl_ || text == impl_->overlay_text) return;
+    impl_->overlay_text = text;
+    impl_->overlay_srv.Reset(); // Rebuilt at the next present
+    impl_->overlay_tex.Reset();
+#else
+    (void)text;
+#endif
+}
 
 void D3D11Renderer::shutdown() {
 #ifdef _WIN32
@@ -560,6 +665,30 @@ void D3D11Renderer::present_vram(const PsxGpu& gpu, bool full_vram, float aspect
     impl_->context->PSSetShaderResources(0, 3, srvs);
 
     impl_->context->Draw(3, 0);
+
+    // Notice overlay at the bottom centre of the window (the game's gauges sit in the corners)
+    if (!impl_->overlay_text.empty() && impl_->ps_overlay && impl_->blend_premul) {
+        if (!impl_->overlay_srv || impl_->overlay_for_h != impl_->backbuf_h) impl_->build_overlay(impl_->backbuf_h);
+        if (impl_->overlay_srv) {
+            const float margin = std::floor(static_cast<float>(impl_->backbuf_h) * 0.03f);
+            D3D11_VIEWPORT ov{};
+            ov.TopLeftX = std::floor((static_cast<float>(impl_->backbuf_w) - static_cast<float>(impl_->overlay_w)) * 0.5f);
+            ov.TopLeftY = static_cast<float>(impl_->backbuf_h) - margin * 2.0f - static_cast<float>(impl_->overlay_h);
+            ov.Width    = static_cast<float>(impl_->overlay_w);
+            ov.Height   = static_cast<float>(impl_->overlay_h);
+            ov.MaxDepth = 1.0f;
+            impl_->context->RSSetViewports(1, &ov);
+            impl_->context->PSSetShader(impl_->ps_overlay.Get(), nullptr, 0);
+            ID3D11ShaderResourceView* ov_srv = impl_->overlay_srv.Get();
+            impl_->context->PSSetShaderResources(3, 1, &ov_srv);
+            const float bf[4] = {0, 0, 0, 0};
+            impl_->context->OMSetBlendState(impl_->blend_premul.Get(), bf, 0xFFFFFFFFu);
+            impl_->context->Draw(3, 0);
+            impl_->context->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFFu);
+            ID3D11ShaderResourceView* null_ov = nullptr;
+            impl_->context->PSSetShaderResources(3, 1, &null_ov);
+        }
+    }
 
     ID3D11ShaderResourceView* null_srvs[3] = {nullptr, nullptr, nullptr};
     impl_->context->PSSetShaderResources(0, 3, null_srvs);

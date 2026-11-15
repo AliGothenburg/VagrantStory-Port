@@ -1018,7 +1018,7 @@ void PsxRuntime::tick_hardware(CpuContext& ctx, u64 elapsed_cycles) {
     // 2. VBlank IRQ0 (~677,376 cycles @ 50Hz PAL / ~564,480 @ 60Hz NTSC), following the video
     //    mode the game programmed via GP1(08h)
     vblank_accum_ += elapsed_cycles;
-    const u64 VBLANK_PERIOD = gpu_.is_pal() ? 677'376ull : 564'480ull;
+    const u64 VBLANK_PERIOD = (gpu_.is_pal() && !pal60_) ? 677'376ull : 564'480ull;
     if (vblank_accum_ >= VBLANK_PERIOD) {
         vblank_accum_ -= VBLANK_PERIOD;
         ++vblank_frames_;

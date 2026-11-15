@@ -234,10 +234,19 @@ struct Win32HostState {
     std::string notice;              // Short message shown in the window title
     ULONGLONG notice_until  = 0;
 
-    void show_notice(HWND hwnd, const std::string& text) {
+    // Shown in the window title and over the picture (so it is also seen in fullscreen)
+    void show_notice(HWND hwnd, const std::string& text, ULONGLONG duration_ms = 2500) {
         notice       = text;
-        notice_until = GetTickCount64() + 2500;
+        notice_until = GetTickCount64() + duration_ms;
         update_window_title(hwnd);
+        if (d3d && d3d->is_initialized()) {
+            std::wstring w(static_cast<std::size_t>(MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, nullptr, 0)), L'\0');
+            if (!w.empty()) {
+                MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, w.data(), static_cast<int>(w.size()));
+                w.pop_back(); // Terminating zero
+            }
+            d3d->set_overlay_text(w);
+        }
     }
     WINDOWPLACEMENT windowed_placement{sizeof(WINDOWPLACEMENT)};
 
@@ -270,7 +279,10 @@ struct Win32HostState {
         const char* backend = (d3d && d3d->is_initialized()) ? d3d->shader_mode_name() : "GDI Yazilim";
         const char* sound   = (audio && audio->is_open()) ? (audio->is_muted() ? "Sessiz" : "44.1kHz ADPCM") : "Kapali";
         if (!notice.empty() && GetTickCount64() < notice_until) {
-            SetWindowTextA(hwnd, ("Vagrant Story - " + notice).c_str());
+            const std::string t = "Vagrant Story - " + notice; // UTF-8 (achievement names, Turkish letters)
+            std::wstring w(static_cast<std::size_t>(MultiByteToWideChar(CP_UTF8, 0, t.c_str(), -1, nullptr, 0)), L'\0');
+            if (!w.empty()) MultiByteToWideChar(CP_UTF8, 0, t.c_str(), -1, w.data(), static_cast<int>(w.size()));
+            SetWindowTextW(hwnd, w.c_str());
             return;
         }
         std::snprintf(title, sizeof(title),
@@ -435,6 +447,7 @@ int main(int argc, char** argv) {
     std::filesystem::path texdump_dir, texpack_dir; // --texdump DIR / --texpack DIR
     int interp_flag = -1;                           // --interp 0/1: frame interpolation (-1 = from settings)
     int runahead_flag = -1;                         // --runahead N: vblanks run ahead (-1 = from settings)
+    int pal60_flag = -1;                            // --pal60 0/1: PAL disc at 60 Hz (-1 = from settings)
     std::filesystem::path interp_dump_dir;          // --dump-interp DIR FROM: pictures around vblank FROM (headless)
     u32 interp_dump_from = 0;
     int reverb_flag = -1;   // --reverb 0/1 (-1 = from settings / on)
@@ -492,6 +505,8 @@ int main(int argc, char** argv) {
             const int ok = rc_hash_generate_from_file(hash, RC_CONSOLE_PLAYSTATION, argv[++i]);
             std::printf("[vs_host] RetroAchievements hash: %s\n", ok ? hash : "(hesaplanamadi)");
             return ok ? 0 : 1;
+        } else if (arg == "--pal60" && i + 1 < argc) {
+            pal60_flag = std::atoi(argv[++i]) != 0 ? 1 : 0;
         } else if (arg == "--runahead" && i + 1 < argc) {
             runahead_flag = std::clamp(std::atoi(argv[++i]), 0, 3);
         } else if (arg == "--interp" && i + 1 < argc) {
@@ -691,6 +706,7 @@ int main(int argc, char** argv) {
         internal_scale = use_settings ? static_cast<u32>(settings.internal_scale) : 1u;
     }
     rt.gpu().set_internal_scale(internal_scale);
+    rt.set_pal60(pal60_flag >= 0 ? pal60_flag == 1 : (use_settings && settings.pal60));
     rt.set_cpu_overclock(static_cast<u32>(overclock >= 0 ? overclock : (use_settings ? settings.cpu_overclock : 100)));
     // Cheat codes: --cheats FILE, or the file next to the exe when switched on in the settings
     CheatList cheats;
@@ -867,7 +883,7 @@ int main(int argc, char** argv) {
                         const double sec = std::chrono::duration<double>(now - last).count();
                         last = now;
                         std::printf("[perf] kare %u: %.0f fps (%.2fx gercek zaman) | GPU primitif: %llu\n", vb, 250.0 / sec,
-                                    (250.0 / sec) / (rt.gpu().is_pal() ? 50.0 : 60.0), static_cast<unsigned long long>(rt.gpu().primitives_drawn()));
+                                    (250.0 / sec) / (rt.video_60hz() ? 60.0 : 50.0), static_cast<unsigned long long>(rt.gpu().primitives_drawn()));
                         std::fflush(stdout);
                     }
                     if (series_every > 0 && vb >= series_from && vb % series_every == 0) {
@@ -1097,7 +1113,7 @@ int main(int argc, char** argv) {
             next_frame = now;
             return;
         }
-        const LONGLONG period = qpc_freq.QuadPart / (rt.gpu().is_pal() ? 50 : 60);
+        const LONGLONG period = qpc_freq.QuadPart / (rt.video_60hz() ? 60 : 50);
         next_frame.QuadPart += period;
         if (now.QuadPart > next_frame.QuadPart + period * 4) {
             next_frame = now; // Far behind (slow frame or window drag): resync instead of racing
@@ -1117,7 +1133,7 @@ int main(int argc, char** argv) {
     if (use_settings && settings.ra_enabled && !settings.ra_token.empty() && !hidden_window) {
         host_log("RetroAchievements: %s olarak baglaniliyor", settings.ra_user.c_str());
         achievements.start(rt, settings.ra_user, settings.ra_token, disc_path,
-                           [&](const std::string& m) { host_state.show_notice(hwnd, m); host_log("%s", m.c_str()); },
+                           [&](const std::string& m) { host_state.show_notice(hwnd, m, 5000); host_log("%s", m.c_str()); },
                            [&](const std::string& m) { host_log("%s", m.c_str()); });
     }
 
@@ -1196,6 +1212,7 @@ int main(int argc, char** argv) {
         if (!host_state.notice.empty() && GetTickCount64() >= host_state.notice_until) {
             host_state.notice.clear();
             host_state.update_window_title(hwnd);
+            if (d3d.is_initialized()) d3d.set_overlay_text(L"");
         }
         // Save state requests for the main loop
         const u32 vb_now = rt.vblank_count();

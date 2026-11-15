@@ -50,6 +50,7 @@ struct GameSettings {
     bool reverb         = true;   // PS1 reverb unit (echo)
     bool audio_cubic    = false;  // Cubic instead of linear sample interpolation
     bool cheats         = false;  // Apply the cheat codes in cheats_path()
+    bool pal60          = false;  // PAL disc at 60 Hz (NTSC speed)
     int  runahead       = 0;      // Input lag reduction: vblanks run ahead (0..3)
     bool ra_enabled     = false;  // RetroAchievements (softcore)
     std::string ra_user;          // RetroAchievements user name

@@ -82,6 +82,11 @@ public:
     // Digital Controller State (16-bit active-low PS1 pad buttons: 0xFFFF = no buttons pressed)
     void set_pad_buttons(u16 buttons_active_low) noexcept { pad_buttons_ = buttons_active_low; }
     // Emulated CPU speed in percent of the PS1 (100 = original, up to 400)
+    // PAL disc at 60 Hz: vblanks come at the NTSC rate although the game set PAL mode, so a
+    // game that counts vblanks runs at NTSC speed (the PAL release is otherwise ~17% slower)
+    void set_pal60(bool on) noexcept { pal60_ = on; }
+    // The rate vblanks really come at (what the host paces presentation to)
+    [[nodiscard]] bool video_60hz() const noexcept { return !gpu_.is_pal() || pal60_; }
     void set_cpu_overclock(u32 percent) noexcept { cpu_overclock_percent_ = percent < 100u ? 100u : (percent > 400u ? 400u : percent); }
     // Controller type: DualShock (config commands, vibration motors, analog mode) or plain digital pad
     void set_pad_dualshock(bool on) noexcept { pad_dualshock_ = on; }
@@ -242,6 +247,7 @@ private:
     bool sio_selected_  = false;
     bool sio_is_memcard_ = false;
     u32 cpu_overclock_percent_ = 100;
+    bool pal60_ = false;
     u64 cpu_overclock_rem_     = 0;
     // DualShock state (see write_mmio8, SIO0 data)
     bool pad_dualshock_   = false;
