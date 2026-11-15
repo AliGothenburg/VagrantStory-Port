@@ -11,6 +11,7 @@
 #ifdef _WIN32
 #include <d3d11.h>
 #include <d3dcompiler.h>
+#include <dxgi1_6.h>
 #include <wrl/client.h>
 #endif
 
@@ -326,8 +327,16 @@ bool D3D11HrBackend::init(ID3D11Device* shared, std::string* err) {
         device_ = shared;
     } else {
         const D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_10_0};
-        HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, levels, 3, D3D11_SDK_VERSION,
-                                       &device_, nullptr, nullptr);
+        HRESULT hr = E_FAIL;
+        if (auto* adapter = static_cast<IDXGIAdapter*>(acquire_high_performance_adapter())) {
+            hr = D3D11CreateDevice(adapter, D3D_DRIVER_TYPE_UNKNOWN, nullptr, 0, levels, 3, D3D11_SDK_VERSION,
+                                   &device_, nullptr, nullptr);
+            adapter->Release();
+        }
+        if (FAILED(hr)) {
+            hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, levels, 3, D3D11_SDK_VERSION,
+                                   &device_, nullptr, nullptr);
+        }
         if (FAILED(hr)) {
             hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, levels, 3, D3D11_SDK_VERSION,
                                    &device_, nullptr, nullptr);
@@ -916,6 +925,57 @@ const std::vector<u32>& D3D11HrBackend::picture() {
 
 } // namespace
 
+namespace {
+std::string g_preferred_adapter;
+
+// Calls f(adapter, utf8 name) for each hardware adapter, most powerful first, until f returns true
+template <typename F>
+void for_each_adapter(F&& f) {
+    ComPtr<IDXGIFactory6> factory;
+    if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) return; // Older than Windows 10 1803
+    ComPtr<IDXGIAdapter1> adapter;
+    for (UINT i = 0; SUCCEEDED(factory->EnumAdapterByGpuPreference(i, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE,
+                                                                    IID_PPV_ARGS(&adapter))); ++i) {
+        DXGI_ADAPTER_DESC1 d{};
+        if (SUCCEEDED(adapter->GetDesc1(&d)) && (d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) == 0) {
+            char utf8[256]{};
+            WideCharToMultiByte(CP_UTF8, 0, d.Description, -1, utf8, sizeof(utf8) - 1, nullptr, nullptr);
+            if (f(adapter, std::string(utf8))) return;
+        }
+        adapter.Reset();
+    }
+}
+} // namespace
+
+std::vector<std::string> list_graphics_adapters() {
+    std::vector<std::string> names;
+    for_each_adapter([&](ComPtr<IDXGIAdapter1>&, const std::string& n) {
+        if (std::find(names.begin(), names.end(), n) == names.end()) names.push_back(n);
+        return false;
+    });
+    return names;
+}
+
+void set_preferred_adapter(const std::string& name) { g_preferred_adapter = name; }
+
+void* acquire_high_performance_adapter() {
+    IDXGIAdapter1* best = nullptr;
+    IDXGIAdapter1* chosen = nullptr;
+    for_each_adapter([&](ComPtr<IDXGIAdapter1>& a, const std::string& n) {
+        if (!best) best = ComPtr<IDXGIAdapter1>(a).Detach();       // First = most powerful
+        if (!g_preferred_adapter.empty() && n == g_preferred_adapter) {
+            chosen = ComPtr<IDXGIAdapter1>(a).Detach();
+            return true;
+        }
+        return g_preferred_adapter.empty();
+    });
+    if (chosen) {
+        if (best) best->Release();
+        return chosen;
+    }
+    return best; // Automatic, or the chosen card is no longer there
+}
+
 std::unique_ptr<HrBackend> make_d3d11_hr_backend(void* device, std::string* err) {
     auto b = std::make_unique<D3D11HrBackend>();
     if (!b->init(static_cast<ID3D11Device*>(device), err)) return nullptr;
@@ -928,6 +988,10 @@ std::unique_ptr<HrBackend> make_d3d11_hr_backend(void*, std::string* err) {
     if (err) *err = "Direct3D 11 yalnizca Windows'ta var";
     return nullptr;
 }
+
+std::vector<std::string> list_graphics_adapters() { return {}; }
+void set_preferred_adapter(const std::string&) {}
+void* acquire_high_performance_adapter() { return nullptr; }
 
 #endif
 

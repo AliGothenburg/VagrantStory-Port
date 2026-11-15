@@ -1,10 +1,12 @@
 #include "launcher_win32.hpp"
 
 #include "vsport/cdrom_iso.hpp"
+#include "vsport/d3d11_hr_backend.hpp" // list_graphics_adapters
 
 #include <algorithm>
 #include <cstdlib>
 #include <fstream>
+#include <initializer_list>
 #include <vector>
 
 #ifdef _WIN32
@@ -65,6 +67,7 @@ GameSettings load_settings(const std::filesystem::path& ini) {
         else if (key == "aspect")        { s.aspect = clamp_int(num, 0, ASPECT_COUNT - 1); have_aspect = true; }
         else if (key == "internal_scale") s.internal_scale = clamp_int(num, 1, 6);
         else if (key == "renderer")      s.renderer = clamp_int(num, 0, 1);
+        else if (key == "gpu")           s.gpu = val;
         else if (key == "texture_filter") s.texture_filter = num != 0;
         else if (key == "rim_light")     s.rim_light = clamp_int(num, 0, 2);
         else if (key == "pgxp")          s.pgxp = clamp_int(num, 0, 2);
@@ -98,6 +101,8 @@ void save_settings(const std::filesystem::path& ini, const GameSettings& s) {
     out << "internal_scale=" << s.internal_scale << "\n";
     out << "# renderer: yuksek cozunurluk cizimi 0=ekran karti (Direct3D 11) 1=islemci\n";
     out << "renderer=" << s.renderer << "\n";
+    out << "# gpu: ekran karti adi; bos = otomatik (en guclu)\n";
+    out << "gpu=" << s.gpu << "\n";
     out << "texture_filter=" << (s.texture_filter ? 1 : 0) << "\n";
     out << "# rim_light: karakter kenar isigi 0=yumusak 1=keskin 2=kapali\n";
     out << "rim_light=" << s.rim_light << "\n";
@@ -217,10 +222,20 @@ enum ControlId : int {
     ID_RES_COMBO, ID_TEXFILTER_CHECK,
     ID_CARD_EDIT, ID_CARD_CHANGE, ID_CARD_OPEN,
     ID_MUTE_CHECK, ID_VOLUME_SLIDER, ID_VOLUME_LABEL,
-    ID_SHOW_CHECK, ID_PAD_BUTTON, ID_ASPECT_COMBO, ID_RIM_COMBO, ID_PGXP_COMBO, ID_RENDERER_COMBO,
+    ID_SHOW_CHECK, ID_ASPECT_COMBO, ID_RIM_COMBO, ID_PGXP_COMBO, ID_RENDERER_COMBO, ID_GPU_COMBO,
     ID_PAD_COMBO0 = 300, // .. ID_PAD_COMBO0 + REMAP_COUNT - 1
     ID_PAD_DEFAULTS = 400,
+    ID_NAV0 = 500,       // .. ID_NAV0 + PAGE_COUNT - 1: page buttons on the left
 };
+
+// Pages of the settings window (buttons on the left). A new group of settings = a new page.
+enum Page : int { PAGE_GAME, PAGE_GRAPHICS, PAGE_DISPLAY, PAGE_SOUND, PAGE_CONTROLS, PAGE_COUNT };
+constexpr const wchar_t* PAGE_NAMES[PAGE_COUNT] = {L"Oyun", L"Grafik", L"Ekran", L"Ses", L"Kontroller"};
+
+// Layout (logical px): title on top, page buttons on the left, the page on the right, footer below
+constexpr int WIN_W = 760, WIN_H = 470;
+constexpr int M = 16, NAV_W = 150, BODY_Y = 48, BODY_H = 360;
+constexpr int PAGE_X = M + NAV_W + 16, PAGE_W = WIN_W - PAGE_X - M;
 
 struct LauncherState {
     GameSettings* s   = nullptr;
@@ -232,6 +247,9 @@ struct LauncherState {
     HWND hwnd         = nullptr;
     bool disc_ok      = false;  // A readable disc image is selected (enables "Oyna")
     bool status_good  = false;  // ...and nothing else is missing (.sbi for the PAL release)
+    std::vector<std::string> gpus; // Graphics cards in the "Ekran kartı" list (after "automatic")
+    int building_page = -1;        // Controls made now belong to this page (-1 = always visible)
+    std::vector<HWND> pages[PAGE_COUNT];
 
     int px(int v) const { return static_cast<int>(v * dpi + 0.5f); }
 };
@@ -241,6 +259,7 @@ HWND make(LauncherState& st, const wchar_t* cls, const wchar_t* text, DWORD styl
     HWND c = CreateWindowExW(ex_style, cls, text, WS_CHILD | WS_VISIBLE | style, st.px(x), st.px(y), st.px(w), st.px(h),
                              st.hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), GetModuleHandleW(nullptr), nullptr);
     SendMessageW(c, WM_SETFONT, reinterpret_cast<WPARAM>(st.font), TRUE);
+    if (st.building_page >= 0) st.pages[st.building_page].push_back(c);
     return c;
 }
 
@@ -324,161 +343,6 @@ int selected_window_height(const LauncherState& st) {
     return WINDOW_HEIGHTS[clamp_int(i, 0, WINDOW_HEIGHT_COUNT - 1)];
 }
 
-void build_controls(LauncherState& st) {
-    GameSettings& s = *st.s;
-    const DWORD tab = WS_TABSTOP;
-    constexpr int W = 520;   // Client width (logical px)
-    constexpr int M = 16;    // Margin
-    int y = 14;
-
-    HWND title = make(st, L"STATIC", L"Vagrant Story — Ayarlar", SS_LEFT, M, y, W - 2 * M, 28, 0);
-    SendMessageW(title, WM_SETFONT, reinterpret_cast<WPARAM>(st.title_font), TRUE);
-    y += 40;
-
-    // --- Game ---
-    make(st, L"BUTTON", L"Oyun", BS_GROUPBOX, M, y, W - 2 * M, 228, 0);
-    y += 24;
-    make(st, L"STATIC", L"Oyun klasörü / disk imajı:", SS_LEFT, M + 12, y, 300, 18, 0);
-    y += 20;
-    make(st, L"EDIT", L"", ES_AUTOHSCROLL | ES_READONLY | WS_BORDER, M + 12, y, 286, 24, ID_DISC_EDIT);
-    make(st, L"BUTTON", L"Klasör seç…", BS_PUSHBUTTON | tab, M + 304, y, 86, 24, ID_DISC_FOLDER);
-    make(st, L"BUTTON", L"Dosya seç…", BS_PUSHBUTTON | tab, M + 396, y, 80, 24, ID_DISC_FILE);
-    y += 32;
-    make(st, L"STATIC", L"Alt kanal dosyası (.sbi, yalnızca Avrupa sürümü):", SS_LEFT, M + 12, y, 400, 18, 0);
-    y += 20;
-    make(st, L"EDIT", L"", ES_AUTOHSCROLL | ES_READONLY | WS_BORDER, M + 12, y, 286, 24, ID_SBI_EDIT);
-    make(st, L"BUTTON", L"Dosya seç…", BS_PUSHBUTTON | tab, M + 304, y, 86, 24, ID_SBI_FILE);
-    make(st, L"BUTTON", L"Kaldır", BS_PUSHBUTTON | tab, M + 396, y, 80, 24, ID_SBI_CLEAR);
-    y += 32;
-    make(st, L"STATIC", L"Hafıza kartı 1 (kayıtlar bu dosyada tutulur):", SS_LEFT, M + 12, y, 400, 18, 0);
-    y += 20;
-    make(st, L"EDIT", L"", ES_AUTOHSCROLL | ES_READONLY | WS_BORDER, M + 12, y, 286, 24, ID_CARD_EDIT);
-    make(st, L"BUTTON", L"Değiştir…", BS_PUSHBUTTON | tab, M + 304, y, 86, 24, ID_CARD_CHANGE);
-    make(st, L"BUTTON", L"Klasörü aç", BS_PUSHBUTTON | tab, M + 396, y, 80, 24, ID_CARD_OPEN);
-    y += 32;
-    make(st, L"STATIC", L"", SS_LEFT, M + 12, y, W - 2 * M - 24, 36, ID_STATUS);
-    y += 54;
-
-    // --- Display ---
-    make(st, L"BUTTON", L"Görüntü", BS_GROUPBOX, M, y, W - 2 * M, 390, 0);
-    y += 26;
-    constexpr int LX = M + 12, CX = M + 150, CW = 220;
-    make(st, L"STATIC", L"İç çözünürlük:", SS_LEFT, LX, y + 3, 130, 20, 0);
-    HWND res = make(st, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | tab | WS_VSCROLL, CX, y, CW, 200, ID_RES_COMBO);
-    SendMessageW(res, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"1×  orijinal (320 × 240)"));
-    SendMessageW(res, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"2×  (640 × 480)"));
-    SendMessageW(res, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"3×  (960 × 720)"));
-    SendMessageW(res, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"4×  (1280 × 960)"));
-    SendMessageW(res, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"5×  (1600 × 1200) — 1080p ekranlar"));
-    SendMessageW(res, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"6×  (1920 × 1440) — 1440p ekranlar"));
-    SendMessageW(res, CB_SETCURSEL, clamp_int(s.internal_scale, 1, 6) - 1, 0);
-    y += 32;
-    make(st, L"STATIC", L"Çizim:", SS_LEFT, LX, y + 3, 130, 20, 0);
-    HWND rend = make(st, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | tab | WS_VSCROLL, CX, y, CW, 200, ID_RENDERER_COMBO);
-    SendMessageW(rend, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Ekran kartı (önerilen)"));
-    SendMessageW(rend, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"İşlemci"));
-    SendMessageW(rend, CB_SETCURSEL, clamp_int(s.renderer, 0, 1), 0);
-    y += 30;
-    HWND texf = make(st, L"BUTTON", L"3D dokuları yumuşat (iç çözünürlük 2× ve üstünde)", BS_AUTOCHECKBOX | tab, LX, y, 420, 20, ID_TEXFILTER_CHECK);
-    SendMessageW(texf, BM_SETCHECK, s.texture_filter ? BST_CHECKED : BST_UNCHECKED, 0);
-    y += 30;
-    make(st, L"STATIC", L"Karakter kenar ışığı:", SS_LEFT, LX, y + 3, 135, 20, 0);
-    HWND rim = make(st, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | tab | WS_VSCROLL, CX, y, CW, 200, ID_RIM_COMBO);
-    SendMessageW(rim, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Yumuşak"));
-    SendMessageW(rim, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Keskin"));
-    SendMessageW(rim, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Kapalı"));
-    SendMessageW(rim, CB_SETCURSEL, clamp_int(s.rim_light, 0, 2), 0);
-    y += 32;
-    make(st, L"STATIC", L"Köşe hassasiyeti:", SS_LEFT, LX, y + 3, 135, 20, 0);
-    HWND pgxp = make(st, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | tab | WS_VSCROLL, CX, y, CW, 200, ID_PGXP_COMBO);
-    SendMessageW(pgxp, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Kapalı (orijinal titreme)"));
-    SendMessageW(pgxp, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Titreme düzeltmesi"));
-    SendMessageW(pgxp, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Titreme + perspektifli doku"));
-    SendMessageW(pgxp, CB_SETCURSEL, clamp_int(s.pgxp, 0, 2), 0);
-    y += 32;
-    make(st, L"STATIC", L"Ekran modu:", SS_LEFT, LX, y + 3, 130, 20, 0);
-    HWND mode = make(st, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | tab | WS_VSCROLL, CX, y, CW, 200, ID_MODE_COMBO);
-    SendMessageW(mode, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Pencere"));
-    SendMessageW(mode, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Tam ekran"));
-    SendMessageW(mode, CB_SETCURSEL, s.fullscreen ? 1 : 0, 0);
-    y += 32;
-    make(st, L"STATIC", L"Görüntü oranı:", SS_LEFT, LX, y + 3, 130, 20, 0);
-    HWND aspect = make(st, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | tab | WS_VSCROLL, CX, y, CW, 220, ID_ASPECT_COMBO);
-    for (const wchar_t* a : {L"4:3  (orijinal)", L"10:7", L"3:2", L"16:10", L"16:9", L"Pencereyi / ekranı doldur"}) {
-        SendMessageW(aspect, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(a));
-    }
-    SendMessageW(aspect, CB_SETCURSEL, clamp_int(s.aspect, 0, ASPECT_COUNT - 1), 0);
-    y += 32;
-    make(st, L"STATIC", L"Pencere boyutu:", SS_LEFT, LX, y + 3, 130, 20, 0);
-    make(st, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | tab | WS_VSCROLL, CX, y, CW, 240, ID_SCALE_COMBO);
-    fill_window_sizes(st, s.window_height);
-    y += 32;
-    make(st, L"STATIC", L"Görüntü filtresi:", SS_LEFT, LX, y + 3, 130, 20, 0);
-    HWND filter = make(st, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | tab | WS_VSCROLL, CX, y, CW, 200, ID_FILTER_COMBO);
-    SendMessageW(filter, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Keskin piksel"));
-    SendMessageW(filter, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Yumuşak (bilinear)"));
-    SendMessageW(filter, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"CRT tarama çizgileri"));
-    SendMessageW(filter, CB_SETCURSEL, clamp_int(s.filter, 0, 2), 0);
-    y += 34;
-    HWND integer = make(st, L"BUTTON", L"Tam sayı ölçekleme (yalnızca 1× iç çözünürlükte; kenarlarda boşluk bırakır)", BS_AUTOCHECKBOX | tab, LX, y, 470, 20, ID_INTEGER_CHECK);
-    SendMessageW(integer, BM_SETCHECK, s.integer_scale ? BST_CHECKED : BST_UNCHECKED, 0);
-    y += 24;
-    HWND wide = make(st, L"BUTTON", L"3D sahneyi orana göre genişlet (kapalıysa görüntü esnetilir;\n"
-                                    L"deneysel: kenarlarda boşluklar görülebilir)",
-                     BS_AUTOCHECKBOX | BS_MULTILINE | tab, LX, y, 470, 36, ID_WIDE_CHECK);
-    SendMessageW(wide, BM_SETCHECK, s.widescreen ? BST_CHECKED : BST_UNCHECKED, 0);
-    y += 62;
-
-    // --- Sound ---
-    make(st, L"BUTTON", L"Ses", BS_GROUPBOX, M, y, W - 2 * M, 66, 0);
-    y += 26;
-    HWND mute = make(st, L"BUTTON", L"Sesi kapat", BS_AUTOCHECKBOX | tab, LX, y + 2, 110, 20, ID_MUTE_CHECK);
-    SendMessageW(mute, BM_SETCHECK, s.muted ? BST_CHECKED : BST_UNCHECKED, 0);
-    make(st, L"STATIC", L"Seviye:", SS_LEFT, LX + 130, y + 3, 50, 20, 0);
-    HWND vol = make(st, TRACKBAR_CLASSW, L"", TBS_HORZ | TBS_NOTICKS | tab, LX + 180, y, 220, 26, ID_VOLUME_SLIDER);
-    SendMessageW(vol, TBM_SETRANGE, TRUE, MAKELPARAM(0, 100));
-    SendMessageW(vol, TBM_SETPAGESIZE, 0, 10);
-    SendMessageW(vol, TBM_SETPOS, TRUE, clamp_int(s.volume, 0, 100));
-    make(st, L"STATIC", L"", SS_LEFT, LX + 406, y + 3, 50, 20, ID_VOLUME_LABEL);
-    y += 52;
-
-    // --- Footer ---
-    HWND show = make(st, L"BUTTON", L"Bu pencereyi her açılışta göster  (kapalıyken oyunu Shift ile başlatın)",
-                     BS_AUTOCHECKBOX | tab, M, y, W - 2 * M, 20, ID_SHOW_CHECK);
-    SendMessageW(show, BM_SETCHECK, s.show_launcher ? BST_CHECKED : BST_UNCHECKED, 0);
-    y += 32;
-    make(st, L"BUTTON", L"Kontrolcü tuşları…", BS_PUSHBUTTON | tab, M, y, 150, 30, ID_PAD_BUTTON);
-    make(st, L"BUTTON", L"Çıkış", BS_PUSHBUTTON | tab, W - M - 100 - 8 - 120, y, 100, 30, IDCANCEL);
-    make(st, L"BUTTON", L"Oyna", BS_DEFPUSHBUTTON | tab, W - M - 120, y, 120, 30, IDOK);
-
-    update_status(st);
-    update_volume_label(st);
-}
-
-void read_controls(LauncherState& st) {
-    GameSettings& s = *st.s;
-    s.fullscreen    = SendMessageW(item(st, ID_MODE_COMBO), CB_GETCURSEL, 0, 0) == 1;
-    s.window_height = selected_window_height(st);
-    s.aspect        = clamp_int(static_cast<int>(SendMessageW(item(st, ID_ASPECT_COMBO), CB_GETCURSEL, 0, 0)), 0, ASPECT_COUNT - 1);
-    s.internal_scale = clamp_int(static_cast<int>(SendMessageW(item(st, ID_RES_COMBO), CB_GETCURSEL, 0, 0)) + 1, 1, 6);
-    s.renderer      = clamp_int(static_cast<int>(SendMessageW(item(st, ID_RENDERER_COMBO), CB_GETCURSEL, 0, 0)), 0, 1);
-    s.texture_filter = SendMessageW(item(st, ID_TEXFILTER_CHECK), BM_GETCHECK, 0, 0) == BST_CHECKED;
-    s.rim_light     = clamp_int(static_cast<int>(SendMessageW(item(st, ID_RIM_COMBO), CB_GETCURSEL, 0, 0)), 0, 2);
-    s.pgxp          = clamp_int(static_cast<int>(SendMessageW(item(st, ID_PGXP_COMBO), CB_GETCURSEL, 0, 0)), 0, 2);
-    s.filter        = clamp_int(static_cast<int>(SendMessageW(item(st, ID_FILTER_COMBO), CB_GETCURSEL, 0, 0)), 0, 2);
-    s.integer_scale = SendMessageW(item(st, ID_INTEGER_CHECK), BM_GETCHECK, 0, 0) == BST_CHECKED;
-    s.widescreen    = SendMessageW(item(st, ID_WIDE_CHECK), BM_GETCHECK, 0, 0) == BST_CHECKED;
-    s.muted         = SendMessageW(item(st, ID_MUTE_CHECK), BM_GETCHECK, 0, 0) == BST_CHECKED;
-    s.volume        = clamp_int(static_cast<int>(SendMessageW(item(st, ID_VOLUME_SLIDER), TBM_GETPOS, 0, 0)), 0, 100);
-    s.show_launcher = SendMessageW(item(st, ID_SHOW_CHECK), BM_GETCHECK, 0, 0) == BST_CHECKED;
-}
-
-// ---------------------------------------------------------------------------------------------
-// Controller button window (modal over the settings window)
-// ---------------------------------------------------------------------------------------------
-
-constexpr const wchar_t* PAD_WND_CLASS = L"VagrantStoryPadMapWnd";
-
 // PS1 buttons, in pad::REMAP_BITS order
 constexpr const wchar_t* PS1_BUTTON_NAMES[pad::REMAP_COUNT] = {
     L"×  Çarpı", L"○  Daire", L"□  Kare", L"△  Üçgen", L"L1", L"R1",
@@ -491,111 +355,201 @@ constexpr const wchar_t* PHYSICAL_BUTTON_NAMES[pad::REMAP_COUNT] = {
     L"Start / Options", L"Back / Share", L"Sol çubuğa bas  (L3)", L"Sağ çubuğa bas  (R3)",
 };
 
-struct PadDialogState {
-    LauncherState ui;              // hwnd = the pad window; shares font / DPI with the launcher
-    pad::ButtonMap* map = nullptr; // Written only on "Tamam"
-    bool done = false;
-};
-
-void pad_dialog_select(PadDialogState& st, const pad::ButtonMap& m) {
+void pad_select(LauncherState& st, const pad::ButtonMap& m) {
     for (std::size_t i = 0; i < pad::REMAP_COUNT; ++i) {
         const int src = m[i];
         // Combo entry 0 = "(atanmamış)", 1.. = physical buttons
-        SendMessageW(item(st.ui, ID_PAD_COMBO0 + static_cast<int>(i)), CB_SETCURSEL,
+        SendMessageW(item(st, ID_PAD_COMBO0 + static_cast<int>(i)), CB_SETCURSEL,
                      src >= 0 && src < static_cast<int>(pad::REMAP_COUNT) ? src + 1 : 0, 0);
     }
 }
 
-LRESULT CALLBACK PadWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
-    auto* st = reinterpret_cast<PadDialogState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
-    switch (msg) {
-        case WM_CREATE: {
-            st = static_cast<PadDialogState*>(reinterpret_cast<CREATESTRUCTW*>(lparam)->lpCreateParams);
-            SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(st));
-            st->ui.hwnd = hwnd;
-            LauncherState& ui = st->ui;
-            constexpr int W = 420, M = 16;
-            int y = 12;
-            make(ui, L"STATIC", L"Her PS1 tuşu için kontrolcünüzde hangi tuşun kullanılacağını seçin.\n"
-                                L"Yön tuşları ve sol çubuk her zaman yön olarak çalışır.",
-                 SS_LEFT, M, y, W - 2 * M, 36, 0);
-            y += 46;
-            for (std::size_t i = 0; i < pad::REMAP_COUNT; ++i) {
-                make(ui, L"STATIC", PS1_BUTTON_NAMES[i], SS_LEFT, M, y + 3, 110, 20, 0);
-                HWND c = make(ui, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL, M + 120, y, W - 2 * M - 120,
-                              300, ID_PAD_COMBO0 + static_cast<int>(i));
-                SendMessageW(c, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"(atanmamış)"));
-                for (const wchar_t* name : PHYSICAL_BUTTON_NAMES) {
-                    SendMessageW(c, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(name));
-                }
-                y += 30;
-            }
-            y += 10;
-            make(ui, L"BUTTON", L"Varsayılana döndür", BS_PUSHBUTTON | WS_TABSTOP, M, y, 140, 30, ID_PAD_DEFAULTS);
-            make(ui, L"BUTTON", L"İptal", BS_PUSHBUTTON | WS_TABSTOP, W - M - 90 - 8 - 90, y, 90, 30, IDCANCEL);
-            make(ui, L"BUTTON", L"Tamam", BS_DEFPUSHBUTTON | WS_TABSTOP, W - M - 90, y, 90, 30, IDOK);
-            pad_dialog_select(*st, *st->map);
-            return 0;
-        }
-        case WM_COMMAND:
-            if (!st) break;
-            switch (LOWORD(wparam)) {
-                case ID_PAD_DEFAULTS:
-                    pad_dialog_select(*st, pad::default_button_map());
-                    return 0;
-                case IDOK:
-                    for (std::size_t i = 0; i < pad::REMAP_COUNT; ++i) {
-                        const auto sel = SendMessageW(item(st->ui, ID_PAD_COMBO0 + static_cast<int>(i)), CB_GETCURSEL, 0, 0);
-                        (*st->map)[i] = static_cast<s8>(sel <= 0 ? -1 : sel - 1);
-                    }
-                    DestroyWindow(hwnd);
-                    return 0;
-                case IDCANCEL:
-                    DestroyWindow(hwnd);
-                    return 0;
-            }
-            break;
-        case WM_CLOSE:
-            DestroyWindow(hwnd);
-            return 0;
-        case WM_DESTROY:
-            if (st) st->done = true;
-            return 0;
+void show_page(LauncherState& st, int page) {
+    for (int p = 0; p < PAGE_COUNT; ++p) {
+        for (HWND c : st.pages[p]) ShowWindow(c, p == page ? SW_SHOWNA : SW_HIDE);
+        SendMessageW(item(st, ID_NAV0 + p), BM_SETCHECK, p == page ? BST_CHECKED : BST_UNCHECKED, 0);
     }
-    return DefWindowProcW(hwnd, msg, wparam, lparam);
 }
 
-void run_pad_dialog(LauncherState& owner) {
-    PadDialogState st;
-    st.ui.dpi        = owner.dpi;
-    st.ui.font       = owner.font;
-    st.ui.title_font = owner.title_font;
-    st.map           = &owner.s->pad_map;
+HWND add_combo(LauncherState& st, int x, int y, int w, int id, std::initializer_list<const wchar_t*> entries, int sel) {
+    HWND c = make(st, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL, x, y, w, 240, id);
+    for (const wchar_t* e : entries) SendMessageW(c, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(e));
+    SendMessageW(c, CB_SETCURSEL, sel, 0);
+    return c;
+}
 
-    const DWORD style = WS_POPUP | WS_CAPTION | WS_SYSMENU;
-    RECT r{0, 0, owner.px(420), owner.px(12 + 46 + static_cast<int>(pad::REMAP_COUNT) * 30 + 10 + 30 + 14)};
-    AdjustWindowRectEx(&r, style, FALSE, WS_EX_CONTROLPARENT | WS_EX_DLGMODALFRAME);
-    RECT o{};
-    GetWindowRect(owner.hwnd, &o);
-    const int ww = r.right - r.left, wh = r.bottom - r.top;
-    const int x = o.left + ((o.right - o.left) - ww) / 2, y = o.top + ((o.bottom - o.top) - wh) / 2;
+HWND add_check(LauncherState& st, const wchar_t* text, int x, int y, int w, int h, int id, bool on, DWORD extra = 0) {
+    HWND c = make(st, L"BUTTON", text, BS_AUTOCHECKBOX | WS_TABSTOP | extra, x, y, w, h, id);
+    SendMessageW(c, BM_SETCHECK, on ? BST_CHECKED : BST_UNCHECKED, 0);
+    return c;
+}
 
-    EnableWindow(owner.hwnd, FALSE);
-    HWND hwnd = CreateWindowExW(WS_EX_CONTROLPARENT | WS_EX_DLGMODALFRAME, PAD_WND_CLASS, L"Kontrolcü tuşları", style,
-                                x, std::max(0, y), ww, wh, owner.hwnd, nullptr, GetModuleHandleW(nullptr), &st);
-    if (hwnd) {
-        ShowWindow(hwnd, SW_SHOWNORMAL);
-        SetFocus(GetDlgItem(hwnd, IDOK));
-        MSG msg{};
-        while (!st.done && GetMessageW(&msg, nullptr, 0, 0) > 0) {
-            if (!IsDialogMessageW(hwnd, &msg)) {
-                TranslateMessage(&msg);
-                DispatchMessageW(&msg);
-            }
-        }
+void build_controls(LauncherState& st) {
+    GameSettings& s = *st.s;
+    const DWORD tab = WS_TABSTOP;
+
+    HWND title = make(st, L"STATIC", L"Vagrant Story — Ayarlar", SS_LEFT, M, 12, WIN_W - 2 * M, 28, 0);
+    SendMessageW(title, WM_SETFONT, reinterpret_cast<WPARAM>(st.title_font), TRUE);
+
+    // --- Page buttons (left) ---
+    for (int p = 0; p < PAGE_COUNT; ++p) {
+        make(st, L"BUTTON", PAGE_NAMES[p], BS_AUTORADIOBUTTON | BS_PUSHLIKE | tab | (p == 0 ? WS_GROUP : 0),
+             M, BODY_Y + 8 + p * 40, NAV_W, 34, ID_NAV0 + p);
     }
-    EnableWindow(owner.hwnd, TRUE);
-    SetForegroundWindow(owner.hwnd);
+
+    // Page frame and its first content row
+    constexpr int LX = PAGE_X + 14, IW = PAGE_W - 28;          // Content left / width
+    constexpr int CX = PAGE_X + 170, CW = 260;                  // Combo column
+    const auto begin_page = [&](int p) {
+        st.building_page = p;
+        make(st, L"BUTTON", PAGE_NAMES[p], BS_GROUPBOX | WS_GROUP, PAGE_X, BODY_Y, PAGE_W, BODY_H, 0);
+        return BODY_Y + 28;
+    };
+    const auto label = [&](const wchar_t* t, int y) { make(st, L"STATIC", t, SS_LEFT, LX, y + 3, 150, 20, 0); };
+
+    // --- Oyun: disc image, .sbi, memory card ---
+    int y = begin_page(PAGE_GAME);
+    constexpr int BW = 100, EW = IW - 2 * BW - 12, B1 = LX + EW + 6, B2 = B1 + BW + 6;
+    make(st, L"STATIC", L"Oyun klasörü / disk imajı:", SS_LEFT, LX, y, IW, 18, 0);
+    make(st, L"EDIT", L"", ES_AUTOHSCROLL | ES_READONLY | WS_BORDER, LX, y + 20, EW, 24, ID_DISC_EDIT);
+    make(st, L"BUTTON", L"Klasör seç…", BS_PUSHBUTTON | tab, B1, y + 20, BW, 24, ID_DISC_FOLDER);
+    make(st, L"BUTTON", L"Dosya seç…", BS_PUSHBUTTON | tab, B2, y + 20, BW, 24, ID_DISC_FILE);
+    y += 56;
+    make(st, L"STATIC", L"Alt kanal dosyası (.sbi, yalnızca Avrupa sürümü):", SS_LEFT, LX, y, IW, 18, 0);
+    make(st, L"EDIT", L"", ES_AUTOHSCROLL | ES_READONLY | WS_BORDER, LX, y + 20, EW, 24, ID_SBI_EDIT);
+    make(st, L"BUTTON", L"Dosya seç…", BS_PUSHBUTTON | tab, B1, y + 20, BW, 24, ID_SBI_FILE);
+    make(st, L"BUTTON", L"Kaldır", BS_PUSHBUTTON | tab, B2, y + 20, BW, 24, ID_SBI_CLEAR);
+    y += 56;
+    make(st, L"STATIC", L"Hafıza kartı 1 (kayıtlar bu dosyada tutulur):", SS_LEFT, LX, y, IW, 18, 0);
+    make(st, L"EDIT", L"", ES_AUTOHSCROLL | ES_READONLY | WS_BORDER, LX, y + 20, EW, 24, ID_CARD_EDIT);
+    make(st, L"BUTTON", L"Değiştir…", BS_PUSHBUTTON | tab, B1, y + 20, BW, 24, ID_CARD_CHANGE);
+    make(st, L"BUTTON", L"Klasörü aç", BS_PUSHBUTTON | tab, B2, y + 20, BW, 24, ID_CARD_OPEN);
+    y += 64;
+    make(st, L"STATIC", L"", SS_LEFT, LX, y, IW, 40, ID_STATUS);
+
+    // --- Grafik: how the 3D picture is drawn ---
+    y = begin_page(PAGE_GRAPHICS);
+    label(L"İç çözünürlük:", y);
+    add_combo(st, CX, y, CW, ID_RES_COMBO,
+              {L"1×  orijinal (320 × 240)", L"2×  (640 × 480)", L"3×  (960 × 720)", L"4×  (1280 × 960)",
+               L"5×  (1600 × 1200) — 1080p ekranlar", L"6×  (1920 × 1440) — 1440p ekranlar"},
+              clamp_int(s.internal_scale, 1, 6) - 1);
+    y += 34;
+    label(L"Çizim:", y);
+    add_combo(st, CX, y, CW, ID_RENDERER_COMBO, {L"Ekran kartı (önerilen)", L"İşlemci"}, clamp_int(s.renderer, 0, 1));
+    y += 34;
+    label(L"Ekran kartı:", y);
+    HWND gpu = add_combo(st, CX, y, IW - (CX - LX), ID_GPU_COMBO, {L"Otomatik (en güçlü)"}, 0);
+    st.gpus = list_graphics_adapters();
+    int gpu_sel = 0;
+    for (std::size_t i = 0; i < st.gpus.size(); ++i) {
+        SendMessageW(gpu, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(widen(st.gpus[i]).c_str()));
+        if (st.gpus[i] == s.gpu) gpu_sel = static_cast<int>(i) + 1;
+    }
+    SendMessageW(gpu, CB_SETCURSEL, gpu_sel, 0); // A card that is no longer there falls back to automatic
+    y += 34;
+    label(L"Karakter kenar ışığı:", y);
+    add_combo(st, CX, y, CW, ID_RIM_COMBO, {L"Yumuşak", L"Keskin", L"Kapalı"}, clamp_int(s.rim_light, 0, 2));
+    y += 34;
+    label(L"Köşe hassasiyeti:", y);
+    add_combo(st, CX, y, CW, ID_PGXP_COMBO, {L"Kapalı (orijinal titreme)", L"Titreme düzeltmesi", L"Titreme + perspektifli doku"},
+              clamp_int(s.pgxp, 0, 2));
+    y += 38;
+    add_check(st, L"3D dokuları yumuşat (iç çözünürlük 2× ve üstünde)", LX, y, IW, 20, ID_TEXFILTER_CHECK, s.texture_filter);
+
+    // --- Ekran: window, aspect ratio, filter ---
+    y = begin_page(PAGE_DISPLAY);
+    label(L"Ekran modu:", y);
+    add_combo(st, CX, y, CW, ID_MODE_COMBO, {L"Pencere", L"Tam ekran"}, s.fullscreen ? 1 : 0);
+    y += 34;
+    label(L"Görüntü oranı:", y);
+    add_combo(st, CX, y, CW, ID_ASPECT_COMBO, {L"4:3  (orijinal)", L"10:7", L"3:2", L"16:10", L"16:9", L"Pencereyi / ekranı doldur"},
+              clamp_int(s.aspect, 0, ASPECT_COUNT - 1));
+    y += 34;
+    label(L"Pencere boyutu:", y);
+    make(st, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | tab | WS_VSCROLL, CX, y, CW, 240, ID_SCALE_COMBO);
+    fill_window_sizes(st, s.window_height);
+    y += 34;
+    label(L"Görüntü filtresi:", y);
+    add_combo(st, CX, y, CW, ID_FILTER_COMBO, {L"Keskin piksel", L"Yumuşak (bilinear)", L"CRT tarama çizgileri"},
+              clamp_int(s.filter, 0, 2));
+    y += 40;
+    add_check(st, L"Tam sayı ölçekleme (yalnızca 1× iç çözünürlükte; kenarlarda boşluk bırakır)", LX, y, IW, 20,
+              ID_INTEGER_CHECK, s.integer_scale);
+    y += 28;
+    add_check(st, L"3D sahneyi orana göre genişlet (kapalıysa görüntü esnetilir;\n"
+                  L"deneysel: kenarlarda boşluklar görülebilir)",
+              LX, y, IW, 36, ID_WIDE_CHECK, s.widescreen, BS_MULTILINE);
+
+    // --- Ses ---
+    y = begin_page(PAGE_SOUND);
+    add_check(st, L"Sesi kapat", LX, y + 2, 140, 20, ID_MUTE_CHECK, s.muted);
+    y += 36;
+    label(L"Ses seviyesi:", y);
+    HWND vol = make(st, TRACKBAR_CLASSW, L"", TBS_HORZ | TBS_NOTICKS | tab, CX - 6, y, CW + 12, 26, ID_VOLUME_SLIDER);
+    SendMessageW(vol, TBM_SETRANGE, TRUE, MAKELPARAM(0, 100));
+    SendMessageW(vol, TBM_SETPAGESIZE, 0, 10);
+    SendMessageW(vol, TBM_SETPOS, TRUE, clamp_int(s.volume, 0, 100));
+    make(st, L"STATIC", L"", SS_LEFT, CX + CW + 14, y + 3, 50, 20, ID_VOLUME_LABEL);
+
+    // --- Kontroller: which controller button acts as each PS1 button ---
+    y = begin_page(PAGE_CONTROLS);
+    make(st, L"STATIC", L"Her PS1 tuşu için kontrolcünüzde hangi tuşun kullanılacağını seçin. Yön tuşları ve sol "
+                        L"çubuk her zaman yön olarak çalışır; klavye tuşları değişmez.",
+         SS_LEFT, LX, y, IW, 36, 0);
+    y += 46;
+    constexpr int COL_W = 268, PAD_LW = 82, PAD_CW = COL_W - PAD_LW - 10;
+    constexpr int PAD_ROWS = static_cast<int>(pad::REMAP_COUNT + 1) / 2;
+    for (std::size_t i = 0; i < pad::REMAP_COUNT; ++i) {
+        const int col = static_cast<int>(i) / PAD_ROWS, row = static_cast<int>(i) % PAD_ROWS;
+        const int x = LX + col * COL_W, yy = y + row * 32;
+        make(st, L"STATIC", PS1_BUTTON_NAMES[i], SS_LEFT, x, yy + 3, PAD_LW, 20, 0);
+        HWND c = make(st, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | tab | WS_VSCROLL, x + PAD_LW, yy, PAD_CW, 300,
+                      ID_PAD_COMBO0 + static_cast<int>(i));
+        SendMessageW(c, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"(atanmamış)"));
+        for (const wchar_t* name : PHYSICAL_BUTTON_NAMES) SendMessageW(c, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(name));
+    }
+    y += PAD_ROWS * 32 + 8;
+    make(st, L"BUTTON", L"Varsayılana döndür", BS_PUSHBUTTON | tab, LX, y, 150, 28, ID_PAD_DEFAULTS);
+    pad_select(st, s.pad_map);
+
+    // --- Footer (always visible) ---
+    st.building_page = -1;
+    const int fy = BODY_Y + BODY_H + 14;
+    HWND show = add_check(st, L"Bu pencereyi her açılışta göster  (kapalıyken oyunu Shift ile başlatın)", M, fy + 5,
+                          WIN_W - 2 * M - 240, 20, ID_SHOW_CHECK, s.show_launcher);
+    SendMessageW(show, WM_SETFONT, reinterpret_cast<WPARAM>(st.font), TRUE);
+    make(st, L"BUTTON", L"Çıkış", BS_PUSHBUTTON | tab | WS_GROUP, WIN_W - M - 120 - 8 - 100, fy, 100, 30, IDCANCEL);
+    make(st, L"BUTTON", L"Oyna", BS_DEFPUSHBUTTON | tab, WIN_W - M - 120, fy, 120, 30, IDOK);
+
+    update_status(st);
+    update_volume_label(st);
+    // Start on the game page when the disc still has to be chosen, otherwise on the graphics page
+    show_page(st, st.disc_ok ? PAGE_GRAPHICS : PAGE_GAME);
+}
+
+void read_controls(LauncherState& st) {
+    GameSettings& s = *st.s;
+    s.fullscreen    = SendMessageW(item(st, ID_MODE_COMBO), CB_GETCURSEL, 0, 0) == 1;
+    s.window_height = selected_window_height(st);
+    s.aspect        = clamp_int(static_cast<int>(SendMessageW(item(st, ID_ASPECT_COMBO), CB_GETCURSEL, 0, 0)), 0, ASPECT_COUNT - 1);
+    s.internal_scale = clamp_int(static_cast<int>(SendMessageW(item(st, ID_RES_COMBO), CB_GETCURSEL, 0, 0)) + 1, 1, 6);
+    s.renderer      = clamp_int(static_cast<int>(SendMessageW(item(st, ID_RENDERER_COMBO), CB_GETCURSEL, 0, 0)), 0, 1);
+    const int gpu_sel = static_cast<int>(SendMessageW(item(st, ID_GPU_COMBO), CB_GETCURSEL, 0, 0));
+    s.gpu = (gpu_sel >= 1 && gpu_sel <= static_cast<int>(st.gpus.size())) ? st.gpus[static_cast<std::size_t>(gpu_sel - 1)] : std::string();
+    s.texture_filter = SendMessageW(item(st, ID_TEXFILTER_CHECK), BM_GETCHECK, 0, 0) == BST_CHECKED;
+    s.rim_light     = clamp_int(static_cast<int>(SendMessageW(item(st, ID_RIM_COMBO), CB_GETCURSEL, 0, 0)), 0, 2);
+    s.pgxp          = clamp_int(static_cast<int>(SendMessageW(item(st, ID_PGXP_COMBO), CB_GETCURSEL, 0, 0)), 0, 2);
+    s.filter        = clamp_int(static_cast<int>(SendMessageW(item(st, ID_FILTER_COMBO), CB_GETCURSEL, 0, 0)), 0, 2);
+    s.integer_scale = SendMessageW(item(st, ID_INTEGER_CHECK), BM_GETCHECK, 0, 0) == BST_CHECKED;
+    s.widescreen    = SendMessageW(item(st, ID_WIDE_CHECK), BM_GETCHECK, 0, 0) == BST_CHECKED;
+    s.muted         = SendMessageW(item(st, ID_MUTE_CHECK), BM_GETCHECK, 0, 0) == BST_CHECKED;
+    s.volume        = clamp_int(static_cast<int>(SendMessageW(item(st, ID_VOLUME_SLIDER), TBM_GETPOS, 0, 0)), 0, 100);
+    s.show_launcher = SendMessageW(item(st, ID_SHOW_CHECK), BM_GETCHECK, 0, 0) == BST_CHECKED;
+    for (std::size_t i = 0; i < pad::REMAP_COUNT; ++i) {
+        const auto sel = SendMessageW(item(st, ID_PAD_COMBO0 + static_cast<int>(i)), CB_GETCURSEL, 0, 0);
+        s.pad_map[i] = static_cast<s8>(sel <= 0 ? -1 : sel - 1);
+    }
 }
 
 LRESULT CALLBACK LauncherWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
@@ -628,7 +582,12 @@ LRESULT CALLBACK LauncherWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
         case WM_COMMAND: {
             if (!st) break;
             GameSettings& s = *st->s;
-            switch (LOWORD(wparam)) {
+            const int id = LOWORD(wparam);
+            if (id >= ID_NAV0 && id < static_cast<int>(ID_NAV0) + static_cast<int>(PAGE_COUNT)) {
+                if (HIWORD(wparam) == BN_CLICKED) show_page(*st, id - ID_NAV0);
+                return 0;
+            }
+            switch (id) {
                 case ID_DISC_FOLDER: {
                     const auto folder = pick_folder(hwnd, L"Vagrant Story disk imajının bulunduğu klasörü seçin");
                     if (!folder.empty()) {
@@ -708,8 +667,8 @@ LRESULT CALLBACK LauncherWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
                 case ID_ASPECT_COMBO:
                     if (HIWORD(wparam) == CBN_SELCHANGE) fill_window_sizes(*st, selected_window_height(*st));
                     return 0;
-                case ID_PAD_BUTTON:
-                    run_pad_dialog(*st);
+                case ID_PAD_DEFAULTS:
+                    pad_select(*st, pad::default_button_map());
                     return 0;
                 case ID_MUTE_CHECK:
                     s.muted = SendMessageW(item(*st, ID_MUTE_CHECK), BM_GETCHECK, 0, 0) == BST_CHECKED;
@@ -755,7 +714,44 @@ std::filesystem::path default_memcard_path() {
     return settings_path().parent_path() / "saves" / "VagrantStory_kart1.mcr";
 }
 
-bool run_settings_window(GameSettings& s) {
+namespace {
+
+// Saves a window's picture (PrintWindow) as a 24-bit BMP
+void save_window_bmp(HWND hwnd, const std::filesystem::path& path) {
+    RECT rc{};
+    GetWindowRect(hwnd, &rc);
+    const int w = rc.right - rc.left, h = rc.bottom - rc.top;
+    HDC screen = GetDC(nullptr);
+    HDC mem = CreateCompatibleDC(screen);
+    BITMAPINFO bi{};
+    bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
+    bi.bmiHeader.biWidth = w;
+    bi.bmiHeader.biHeight = h; // Bottom-up, as BMP files store it
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 24;
+    void* bits = nullptr;
+    HBITMAP bmp = CreateDIBSection(screen, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    HGDIOBJ old = SelectObject(mem, bmp);
+    PrintWindow(hwnd, mem, 0); // Classic WM_PRINT drawing (works off-screen)
+    GdiFlush();
+    const DWORD stride = static_cast<DWORD>((w * 3 + 3) & ~3), size = stride * static_cast<DWORD>(h);
+    BITMAPFILEHEADER fh{};
+    fh.bfType = 0x4D42;
+    fh.bfOffBits = sizeof(fh) + sizeof(bi.bmiHeader);
+    fh.bfSize = fh.bfOffBits + size;
+    std::ofstream out(path, std::ios::binary);
+    out.write(reinterpret_cast<const char*>(&fh), sizeof(fh));
+    out.write(reinterpret_cast<const char*>(&bi.bmiHeader), sizeof(bi.bmiHeader));
+    out.write(static_cast<const char*>(bits), size);
+    SelectObject(mem, old);
+    DeleteObject(bmp);
+    DeleteDC(mem);
+    ReleaseDC(nullptr, screen);
+}
+
+// Shows the settings window. dump_dir: diagnostics, the window opens off-screen, each page is saved
+// as page_N.bmp and the window closes (nothing is saved to the ini).
+bool run_window(GameSettings& s, const std::filesystem::path* dump_dir) {
     INITCOMMONCONTROLSEX icc{sizeof(icc), ICC_STANDARD_CLASSES | ICC_BAR_CLASSES};
     InitCommonControlsEx(&icc);
     const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
@@ -780,34 +776,42 @@ bool run_settings_window(GameSettings& s) {
     wc.hbrBackground = GetSysColorBrush(COLOR_BTNFACE);
     wc.hIcon         = LoadIconW(nullptr, MAKEINTRESOURCEW(32512));   // IDI_APPLICATION
     RegisterClassExW(&wc);
-    WNDCLASSEXW pc = wc;
-    pc.lpfnWndProc   = PadWndProc;
-    pc.lpszClassName = PAD_WND_CLASS;
-    RegisterClassExW(&pc);
 
     const DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
-    RECT r{0, 0, st.px(520), st.px(880)};
-    AdjustWindowRectEx(&r, style, FALSE, WS_EX_CONTROLPARENT);
+    const DWORD ex = WS_EX_CONTROLPARENT | (dump_dir ? WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE : 0u);
+    RECT r{0, 0, st.px(WIN_W), st.px(WIN_H)};
+    AdjustWindowRectEx(&r, style, FALSE, ex);
     const int ww = r.right - r.left, wh = r.bottom - r.top;
-    const int sx = (GetSystemMetrics(SM_CXSCREEN) - ww) / 2, sy = (GetSystemMetrics(SM_CYSCREEN) - wh) / 2;
-    HWND hwnd = CreateWindowExW(WS_EX_CONTROLPARENT, wc.lpszClassName, L"Vagrant Story — Ayarlar", style,
+    int sx = (GetSystemMetrics(SM_CXSCREEN) - ww) / 2, sy = (GetSystemMetrics(SM_CYSCREEN) - wh) / 2;
+    if (dump_dir) { sx = -32000; sy = -32000; } // Off-screen: never seen
+    HWND hwnd = CreateWindowExW(ex, wc.lpszClassName, L"Vagrant Story — Ayarlar", style,
                                 sx, sy, ww, wh, nullptr, nullptr, wc.hInstance, &st);
-    ShowWindow(hwnd, SW_SHOWNORMAL);
-    SetForegroundWindow(hwnd);
-    SetFocus(GetDlgItem(hwnd, IDOK));
-
     MSG msg{};
-    while (!st.done && GetMessageW(&msg, nullptr, 0, 0) > 0) {
-        if (!IsDialogMessageW(hwnd, &msg)) {
-            TranslateMessage(&msg);
-            DispatchMessageW(&msg);
+    if (dump_dir) {
+        ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        for (int p = 0; p < PAGE_COUNT; ++p) {
+            show_page(st, p);
+            RedrawWindow(hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN);
+            while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) DispatchMessageW(&msg);
+            save_window_bmp(hwnd, *dump_dir / ("page_" + std::to_string(p) + ".bmp"));
+        }
+        DestroyWindow(hwnd);
+        st.play = false;
+    } else {
+        ShowWindow(hwnd, SW_SHOWNORMAL);
+        SetForegroundWindow(hwnd);
+        SetFocus(GetDlgItem(hwnd, IDOK));
+        while (!st.done && GetMessageW(&msg, nullptr, 0, 0) > 0) {
+            if (!IsDialogMessageW(hwnd, &msg)) {
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
         }
     }
 
     DeleteObject(st.font);
     DeleteObject(st.title_font);
     UnregisterClassW(wc.lpszClassName, wc.hInstance);
-    UnregisterClassW(PAD_WND_CLASS, wc.hInstance);
     if (SUCCEEDED(com)) CoUninitialize();
 
     if (st.play) {
@@ -816,12 +820,18 @@ bool run_settings_window(GameSettings& s) {
     return st.play;
 }
 
+} // namespace
+
+bool run_settings_window(GameSettings& s) { return run_window(s, nullptr); }
+
+void dump_settings_window(GameSettings s, const std::filesystem::path& dir) { run_window(s, &dir); }
 #else // !_WIN32
 
 void show_message(const std::string&, bool) {}
 std::filesystem::path settings_path() { return "VagrantStory.ini"; }
 std::filesystem::path default_memcard_path() { return "saves/VagrantStory_kart1.mcr"; }
 bool run_settings_window(GameSettings&) { return false; }
+void dump_settings_window(GameSettings, const std::filesystem::path&) {}
 
 #endif
 

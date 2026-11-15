@@ -1,4 +1,5 @@
 #include "vsport/d3d11_renderer.hpp"
+#include "vsport/d3d11_hr_backend.hpp"
 
 #ifdef _WIN32
 #include <d3d11.h>
@@ -263,10 +264,21 @@ bool D3D11Renderer::initialize(HWND hwnd, u32 width, u32 height, std::string* er
     };
     D3D_FEATURE_LEVEL chosen{};
 
-    HRESULT hr = D3D11CreateDeviceAndSwapChain(
-        nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0,
-        levels, 3, D3D11_SDK_VERSION, &sd,
-        &impl_->swapchain, &impl_->device, &chosen, &impl_->context);
+    // The most powerful graphics card (a laptop's dedicated one rather than the integrated one)
+    HRESULT hr = E_FAIL;
+    if (auto* adapter = static_cast<IDXGIAdapter*>(acquire_high_performance_adapter())) {
+        hr = D3D11CreateDeviceAndSwapChain(
+            adapter, D3D_DRIVER_TYPE_UNKNOWN, nullptr, 0,
+            levels, 3, D3D11_SDK_VERSION, &sd,
+            &impl_->swapchain, &impl_->device, &chosen, &impl_->context);
+        adapter->Release();
+    }
+    if (FAILED(hr)) {
+        hr = D3D11CreateDeviceAndSwapChain(
+            nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0,
+            levels, 3, D3D11_SDK_VERSION, &sd,
+            &impl_->swapchain, &impl_->device, &chosen, &impl_->context);
+    }
     if (FAILED(hr)) {
         // Fallback to WARP high-speed SIMD software D3D11 rasterizer if headless GPU
         hr = D3D11CreateDeviceAndSwapChain(

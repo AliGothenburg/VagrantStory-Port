@@ -25,6 +25,12 @@
 #ifdef _WIN32
 #include <windows.h>
 #include <mmsystem.h> // timeBeginPeriod / timeEndPeriod (winmm)
+
+// Laptops with two graphics cards: ask the NVIDIA / AMD drivers for the dedicated one
+extern "C" {
+__declspec(dllexport) DWORD NvOptimusEnablement                = 0x00000001;
+__declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
+}
 #endif
 
 using namespace vsport;
@@ -338,6 +344,8 @@ int main(int argc, char** argv) {
     int rim_mode = -1;         // --rim N (-1 = from settings / default)
     bool perf = false;         // --perf
     int gpu_hr = -1;           // --gpu-hr (1) / --cpu-hr (0); -1 = from settings (window) or CPU (headless)
+    std::string adapter_name;  // --adapter NAME: graphics card (empty = settings / automatic)
+    bool have_adapter = false;
     bool hidden_window = false; // --hidden
     bool no_throttle = false;   // --no-throttle
     std::string window_dump_path; // --window-dump FILE N
@@ -402,6 +410,16 @@ int main(int argc, char** argv) {
             window_dump_frame = static_cast<u32>(std::strtoul(argv[++i], nullptr, 10));
         } else if (arg == "--gpu-hr") {
             gpu_hr = 1; // Draw the upscaled picture on the graphics card (Direct3D 11)
+        } else if (arg == "--adapter" && i + 1 < argc) {
+            adapter_name = argv[++i]; // Graphics card by name ("" = automatic, the most powerful)
+            have_adapter = true;
+        } else if (arg == "--settings-dump" && i + 1 < argc) {
+            // Diagnostics: save each page of the settings window (opened off-screen) as BMP, then quit
+            std::filesystem::path dir = argv[++i];
+            std::error_code ec;
+            std::filesystem::create_directories(dir, ec);
+            launcher::dump_settings_window(launcher::load_settings(launcher::settings_path()), dir);
+            return 0;
         } else if (arg == "--cpu-hr") {
             gpu_hr = 0; // Draw the upscaled picture on the processor (software)
         } else if (arg == "--perf") {
@@ -532,6 +550,8 @@ int main(int argc, char** argv) {
         internal_scale = use_settings ? static_cast<u32>(settings.internal_scale) : 1u;
     }
     rt.gpu().set_internal_scale(internal_scale);
+    // Graphics card: --adapter, else the settings, else automatic (the most powerful one)
+    set_preferred_adapter(have_adapter ? adapter_name : (use_settings ? settings.gpu : std::string()));
     // Upscaled picture on the graphics card; on any failure the processor (software) keeps drawing
     const auto use_gpu_hr = [&rt](void* device) {
         std::string err;

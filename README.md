@@ -23,16 +23,21 @@ Sıfırdan C++20 ile geliştirilen modüler **Vagrant Story (PS1 -> Windows x64)
 `./build.ps1` derlemenin sonunda oyunu `dist/VagrantStory.exe` olarak kopyalar. Bu dosyaya çift
 tıklamak yeterlidir (konsol penceresi açılmaz):
 
-- Açılışta **ayarlar penceresi** gelir:
+- Açılışta **ayarlar penceresi** gelir. Soldaki düğmelerle sayfalar arasında geçilir (Oyun, Grafik,
+  Ekran, Ses, Kontroller):
   - **Oyun:** oyun klasörünü seçin (içindeki `.cue`/`.bin`/`.iso` ve `.sbi` otomatik bulunur) ya da
     dosyaları tek tek seçin. Pencere diski doğrular (sürüm, Avrupa sürümünde `.sbi` durumu).
-  - **Görüntü:** iç çözünürlük (1× orijinal 320×240, 2×–6×; 1080p ekranlar için 5×),
-    3D doku yumuşatma, pencere / tam ekran, **görüntü oranı** (4:3, 10:7, 3:2, 16:10, 16:9 ya da
+  - **Grafik:** iç çözünürlük (1× orijinal 320×240, 2×–6×; 1080p ekranlar için 5×), çizim,
+    ekran kartı, kenar ışığı, köşe hassasiyeti, 3D doku yumuşatma.
+  - **Ekran:** pencere / tam ekran, **görüntü oranı** (4:3, 10:7, 3:2, 16:10, 16:9 ya da
     pencereyi doldur), pencere boyutu (480p, 720p, 960p, 1080p, 1200p, 1440p, 4K; genişlik orana
     göre ayarlanır), filtre (keskin piksel, yumuşak, CRT tarama çizgileri), tam sayı ölçekleme.
   - **Çizim:** yüksek çözünürlüklü görüntüyü kimin çizeceği. **Ekran kartı** (varsayılan,
     Direct3D 11) çok daha hızlıdır; **İşlemci** eski yazılım çizicisidir. İkisinin çıktısı
     neredeyse piksel piksel aynıdır. Ekran kartı başlatılamazsa oyun kendiliğinden işlemciye geçer.
+  - **Ekran kartı:** birden fazla ekran kartı olan bilgisayarlarda (ör. laptoplarda tümleşik +
+    NVIDIA) hangisinin kullanılacağı. **Otomatik** (varsayılan) en güçlüsünü seçer; seçilen kart
+    artık takılı değilse yine otomatik seçime dönülür.
   - **Karakter kenar ışığı:** oyun ara sahnelerde ve menüde karakterleri önce parlak beyaz,
     ışığa doğru ~1 piksel kaydırılmış olarak, sonra normal çizer (orijinal kenar ışığı efekti).
     Yüksek iç çözünürlükte bu kayma sert, kalın bir bant olur. **Yumuşak** (varsayılan) ışığı
@@ -56,7 +61,7 @@ tıklamak yeterlidir (konsol penceresi açılmaz):
     (ör. 16:9 monitörde 16:9) ya da "doldur"u kullanın. Tam sayı ölçekleme yalnızca 1× iç
     çözünürlükte uygulanır.
   - **Ses:** sesi kapatma ve ses seviyesi.
-  - **Kontrolcü tuşları…:** her PS1 tuşunun (×, ○, □, △, L1/R1, L2/R2, START, SELECT, L3/R3)
+  - **Kontroller:** her PS1 tuşunun (×, ○, □, △, L1/R1, L2/R2, START, SELECT, L3/R3)
     kontrolcüde hangi tuşa basılınca çalışacağını seçin; "Varsayılana döndür" konuma göre
     eşlemeye geri döner. Yön tuşları ve sol çubuk sabittir; klavye tuşları değişmez.
 - Ayarlar exe'nin yanındaki `VagrantStory.ini` dosyasına kaydedilir. "Bu pencereyi her açılışta
@@ -72,8 +77,9 @@ tıklamak yeterlidir (konsol penceresi açılmaz):
   çözünürlüklü dokulardaki blokları giderir (2D yazıları da biraz yumuşatır).
 - **Hız:** Yüksek çözünürlüklü görüntüyü varsayılan olarak ekran kartı çizer (Direct3D 11;
   PS1 dokuları, yarı saydamlık, maske biti ve perspektif shader'da PS1 ile aynı tam sayı
-  hesabıyla yapılır). Bu bilgisayarda açılış sinematiğinin en ağır yerlerinde bile 5× ve 6×
-  gerçek zamanın üstünde kalır (en ağır iz efektinde 5× ≈ 1,4 katı). **İşlemci** seçilirse çizim
+  hesabıyla yapılır). İki ekran kartlı laptoplarda güçlü olan (ör. NVIDIA) kendiliğinden seçilir.
+  Bu bilgisayarda (RTX 4060 Laptop) açılış sinematiğinin en ağır yerinde 5× ≈ gerçek zamanın
+  2,8 katı, 6× ≈ 2,6 katı; işlemcinin tümleşik grafiğiyle (Radeon 780M) 5× ≈ 1,5 katı. **İşlemci** seçilirse çizim
   işlemcinin tüm çekirdeklerine şeritler halinde dağıtılır; o zaman ağır sahnelerde 4× ≈ 1,06
   katı, 5× ≈ 0,8 katı (yavaşlama) olur. `vs_host --perf` her 250 karede hızı yazar
   (`--gpu-hr` / `--cpu-hr` çiziciyi seçer; başsız çalıştırmada varsayılan işlemcidir).
@@ -183,7 +189,7 @@ ABD sürümünde (SLUS-01040) bu koruma yoktur.
    | START | `Enter` | Menu (Start) | Options |
    | SELECT | `Backspace` | View (Back) | Share / Create |
 
-   Kontrolcü tuşları ayar penceresindeki **Kontrolcü tuşları…** düğmesiyle değiştirilebilir
+   Kontrolcü tuşları ayar penceresindeki **Kontroller** sayfasından değiştirilebilir
    (`VagrantStory.ini` içinde `pad_cross=circle` gibi satırlar olarak saklanır).
 
    *Pencere Kısayolları:* `F11` / `Alt+Enter` Tam ekran | `Tab` (basılı tut) Hızlı ileri | `F2` Tam 1024×512 VRAM | `F3` Görüntü oranı (4:3 → 10:7 → 3:2 → 16:10 → 16:9 → doldur) | `Shift+F3` 3D genişletme (GTE) | `F4` HLSL Shader Kipi (Keskin / Bilinear / Trinitron CRT) | `M` Ses Aç/Kapat | `F12` PPM Kaydet | `ESC` Çıkış

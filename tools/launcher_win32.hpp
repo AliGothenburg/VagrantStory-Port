@@ -37,6 +37,7 @@ struct GameSettings {
     int  aspect         = 0;      // Index into ASPECT_VALUES
     int  internal_scale = 2;      // Rendering resolution: 1 = native 320x240, 2..6 = N x
     int  renderer       = 0;      // Upscaled picture drawn by: 0 = graphics card (Direct3D 11), 1 = processor
+    std::string gpu;              // Graphics card name (UTF-8); empty = automatic (the most powerful one)
     bool texture_filter = false;  // Bilinear filtering of 3D textures (needs internal_scale >= 2)
     int  rim_light      = 0;      // Character rim light: 0 = soft, 1 = sharp, 2 = off
     int  pgxp           = 2;      // Vertex precision (internal res >= 2): 0 = off, 1 = no wobble, 2 = + perspective textures
@@ -57,6 +58,9 @@ void save_settings(const std::filesystem::path& ini, const GameSettings& s);
 // Shows the settings window. Returns true when the player pressed "Oyna" (settings are saved),
 // false when the window was closed or "Cikis" was pressed.
 [[nodiscard]] bool run_settings_window(GameSettings& s);
+
+// Diagnostics: opens the settings window off-screen, saves each page as DIR\page_N.bmp, closes it
+void dump_settings_window(GameSettings s, const std::filesystem::path& dir);
 
 // Message box helper (UTF-8 text)
 void show_message(const std::string& text, bool error);
