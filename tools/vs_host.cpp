@@ -1091,9 +1091,9 @@ int main(int argc, char** argv) {
         }
     }
     if (audio.initialize(PsxSpu::SAMPLE_RATE)) {
-        std::printf("[vs_host] WinMM 44.1 kHz Stereo SPU ADPCM ses cikisi aktif.\n");
+        std::printf("[vs_host] %s 44.1 kHz Stereo SPU ADPCM ses cikisi aktif.\n", audio.backend());
     }
-    host_log("Ses: %s", audio.is_open() ? "acik" : "acilamadi");
+    host_log("Ses: %s", audio.is_open() ? audio.backend() : "acilamadi");
     Win32GamepadInput gamepad;
     gamepad.initialize(hwnd);
     host_log("Kontrolcu girisi hazir");
@@ -1405,6 +1405,10 @@ int main(int argc, char** argv) {
     if (achievements.active()) {
         achievements.shutdown(); // Waits a moment for unlocks still being sent
         host_log("RetroAchievements kapatildi");
+    }
+    if (audio.is_open()) {
+        std::printf("[vs_host] Ses kuyrugu: %u ms (%s)\n", audio.queue_ms(), audio.backend());
+        host_log("Ses kuyrugu: %u ms (%s)", audio.queue_ms(), audio.backend());
     }
     audio.shutdown();
     host_log("Ses kapatildi");

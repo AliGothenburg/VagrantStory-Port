@@ -205,8 +205,6 @@ u16 PsxRuntime::read16(u32 vaddr) {
     return 0;
 }
 
-static TraceEntry g_watch[16];
-static u32 g_watch_pos = 0;
 
 u32 PsxRuntime::read32(u32 vaddr) {
     const u32 paddr = mask_psx_addr(vaddr);
@@ -261,7 +259,6 @@ void PsxRuntime::write16(u32 vaddr, u16 val) {
 
 void PsxRuntime::write32(u32 vaddr, u32 val) {
     const u32 paddr = mask_psx_addr(vaddr);
-    if (val == 2u && paddr >= 0x1FE000u && paddr < 0x200000u) { g_watch[g_watch_pos++ & 15u] = {paddr, g_trace_ring[(g_trace_pos - 1) & 63u].pc, 0}; }
     if (paddr + 3 < ram_.size()) {
         store_le32(&ram_[paddr], val);
         const u32 p0 = paddr >> 12, p1 = (paddr + 3u) >> 12;
@@ -2033,7 +2030,6 @@ RecompFunc PsxRuntime::find_aot_func(u32 canonical_addr) {
 // Diagnostic: prints the last interpreter-executed PCs (used after an unexpected CPU halt).
 void dump_halt_trace() {
     for (u32 k = 0; k < 64u; ++k) { const TraceEntry& c = g_call_ring[(g_call_pos + k) & 63u]; std::printf("[call] tgt=%08X ra=%08X sp=%08X\n", c.pc, c.ra, c.sp); }
-    for (u32 k = 0; k < 16u; ++k) { const TraceEntry& w = g_watch[(g_watch_pos + k) & 15u]; std::printf("[watch2] addr=%06X lastpc=%08X\n", w.pc, w.ra); }
     const u32 n = g_trace_pos < 64u ? g_trace_pos : 64u;
     for (u32 k = n; k > 0; --k) {
         const TraceEntry& e = g_trace_ring[(g_trace_pos - k) & 63u];

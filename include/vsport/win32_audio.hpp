@@ -7,7 +7,8 @@
 
 namespace vsport {
 
-// Low-latency native Windows waveOut (WinMM) 44.1 kHz 16-bit Stereo Audio Streamer
+// Windows 44.1 kHz 16-bit stereo output: WASAPI shared mode (about 40 ms queue, grows after
+// underruns), falling back to WinMM waveOut when WASAPI cannot be opened
 class Win32AudioOut {
 public:
     Win32AudioOut();
@@ -20,6 +21,10 @@ public:
     void shutdown();
 
     [[nodiscard]] bool is_open() const noexcept { return open_; }
+    // "WASAPI" or "WinMM" while open, nullptr otherwise
+    [[nodiscard]] const char* backend() const noexcept { return backend_; }
+    // Queue depth the output currently aims for, in milliseconds (WinMM: its fixed pool)
+    [[nodiscard]] u32 queue_ms() const noexcept;
     [[nodiscard]] bool is_muted() const noexcept { return muted_; }
     void set_muted(bool m) noexcept { muted_ = m; }
     void toggle_mute() noexcept { muted_ = !muted_; }
@@ -34,6 +39,7 @@ private:
     struct Impl;
     Impl* impl_ = nullptr;
     bool open_  = false;
+    const char* backend_ = nullptr;
     bool muted_ = false;
     u32 volume_percent_ = 100;
 };
