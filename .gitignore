@@ -21,3 +21,10 @@ extracted/
 # Editör / IDE
 .vs/
 .vscode/
+
+# Android (Gradle) build output and local SDK path
+android/.gradle/
+android/build/
+android/app/build/
+android/app/.cxx/
+android/local.properties

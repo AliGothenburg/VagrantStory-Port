@@ -204,21 +204,21 @@ s16 GteEngine::clamp_sxy(int idx, s64 val) noexcept {
     if (val < -1024LL || val > 1023LL) {
         ctrl_[31] |= (1u << (14 - (idx - 1))); // idx 1->bit 14 (SX2), idx 2->bit 13 (SY2)
     }
-    return static_cast<s16>(std::clamp(val, -1024LL, 1023LL));
+    return static_cast<s16>(std::clamp<s64>(val, -1024, 1023));
 }
 
 u16 GteEngine::clamp_sz3(s64 val) noexcept {
     if (val < 0LL || val > 0xFFFFLL) {
         ctrl_[31] |= (1u << 18);
     }
-    return static_cast<u16>(std::clamp(val, 0LL, 0xFFFFLL));
+    return static_cast<u16>(std::clamp<s64>(val, 0, 0xFFFF));
 }
 
 u8 GteEngine::clamp_rgb(int idx, s64 val) noexcept {
     if (val < 0LL || val > 255LL) {
         ctrl_[31] |= (1u << (21 - (idx - 1))); // bits 21, 20, 19
     }
-    return static_cast<u8>(std::clamp(val, 0LL, 255LL));
+    return static_cast<u8>(std::clamp<s64>(val, 0, 255));
 }
 
 void GteEngine::cmd_rtps(int v_idx, bool sf, bool lm, bool last_vertex) noexcept {
@@ -252,7 +252,7 @@ void GteEngine::cmd_rtps(int v_idx, bool sf, bool lm, bool last_vertex) noexcept
     const s16 ir2 = clamp_ir(2, m2, lm);
     // Note: On real PS1 GTE, RTPS checks IR3 saturation on (m3_full >> 12) before writing clamped m3!
     (void)clamp_ir(3, m3_full >> 12, false);
-    const s16 ir3 = static_cast<s16>(std::clamp(m3, lm ? 0LL : -0x8000LL, 0x7FFFLL));
+    const s16 ir3 = static_cast<s16>(std::clamp<s64>(m3, lm ? 0 : -0x8000, 0x7FFF));
 
     data_[9]  = static_cast<u32>(static_cast<s32>(ir1));
     data_[10] = static_cast<u32>(static_cast<s32>(ir2));

@@ -102,9 +102,8 @@ void PsxGpu::reset() {
 
 u32 PsxGpu::read_gpustat() const noexcept {
     // Toggle bit 31 interlaced even/odd line so VSync / GPU poll loops never hang!
-    static u32 toggle = 0;
-    toggle ^= 0x80000000u;
-    return (gpustat_ & 0x7FFFFFFFu) | 0x1C000000u | toggle;
+    stat_toggle_ ^= 0x80000000u; // Per machine, so a second one (cover capture) does not disturb it
+    return (gpustat_ & 0x7FFFFFFFu) | 0x1C000000u | stat_toggle_;
 }
 
 u32 PsxGpu::read_gpuread() {

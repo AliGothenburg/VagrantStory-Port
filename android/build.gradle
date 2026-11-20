@@ -1,0 +1,17 @@
+// Vagrant Story Native Port: Android app (SDL3). The game library is the repository's CMakeLists.txt.
+buildscript {
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        classpath 'com.android.tools.build:gradle:8.7.3'
+    }
+}
+
+allprojects {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}

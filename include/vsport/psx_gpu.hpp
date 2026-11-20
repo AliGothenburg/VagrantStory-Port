@@ -209,6 +209,7 @@ private:
 
     // Drawing environment registers
     u32 gpustat_     = 0x14802000u; // Ready for cmd, DMA, VRAM, interlaced field bit
+    mutable u32 stat_toggle_ = 0; // Interlace bit 31, flipped on every GPUSTAT read
     u16 texpage_     = 0;
     u32 texwin_      = 0; // GP0(E2h) texture window: mask X/Y, offset X/Y (5 bits each)
     s32 clip_x1_     = 0, clip_y1_ = 0;

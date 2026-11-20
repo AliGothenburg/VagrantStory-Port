@@ -24,6 +24,9 @@
 #include <windows.h>
 #include <winhttp.h>
 #pragma comment(lib, "winhttp.lib")
+#else
+#include <cstring>
+#include <dlfcn.h>
 #endif
 
 namespace ra {
@@ -39,6 +42,40 @@ std::wstring widen_utf8(const std::string& s) {
     std::wstring w(static_cast<std::size_t>(n), L'\0');
     MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), w.data(), n);
     return w;
+}
+#endif
+
+#if !defined(_WIN32) && defined(VSPORT_HTTP_CURL)
+// The few libcurl functions used, from libcurl.so.4 (present on SteamOS and desktop Linux)
+struct Curl {
+    bool ok = false;
+    void* (*easy_init)() = nullptr;
+    int (*setopt)(void*, int, ...) = nullptr;
+    int (*perform)(void*) = nullptr;
+    int (*getinfo)(void*, int, ...) = nullptr;
+    void (*easy_cleanup)(void*) = nullptr;
+    void* (*slist_append)(void*, const char*) = nullptr;
+    void (*slist_free_all)(void*) = nullptr;
+};
+const Curl& curl() {
+    static const Curl c = [] {
+        Curl r;
+        void* lib = dlopen("libcurl.so.4", RTLD_NOW);
+        if (!lib) lib = dlopen("libcurl-gnutls.so.4", RTLD_NOW);
+        if (!lib) return r;
+        const auto init = reinterpret_cast<int (*)(long)>(dlsym(lib, "curl_global_init"));
+        r.easy_init      = reinterpret_cast<void* (*)()>(dlsym(lib, "curl_easy_init"));
+        r.setopt         = reinterpret_cast<int (*)(void*, int, ...)>(dlsym(lib, "curl_easy_setopt"));
+        r.perform        = reinterpret_cast<int (*)(void*)>(dlsym(lib, "curl_easy_perform"));
+        r.getinfo        = reinterpret_cast<int (*)(void*, int, ...)>(dlsym(lib, "curl_easy_getinfo"));
+        r.easy_cleanup   = reinterpret_cast<void (*)(void*)>(dlsym(lib, "curl_easy_cleanup"));
+        r.slist_append   = reinterpret_cast<void* (*)(void*, const char*)>(dlsym(lib, "curl_slist_append"));
+        r.slist_free_all = reinterpret_cast<void (*)(void*)>(dlsym(lib, "curl_slist_free_all"));
+        r.ok = init && r.easy_init && r.setopt && r.perform && r.getinfo && r.easy_cleanup && r.slist_append && r.slist_free_all &&
+               init(3L) == 0; // CURL_GLOBAL_DEFAULT; once, before any worker thread
+        return r;
+    }();
+    return c;
 }
 #endif
 
@@ -101,6 +138,41 @@ HttpResult http_request(const std::string& url, const char* post_data, const std
     }
     if (connect) WinHttpCloseHandle(connect);
     WinHttpCloseHandle(session);
+#elif defined(VSPORT_HTTP_CURL)
+    // Linux / Steam Deck: the system libcurl, loaded at run time (no build dependency)
+    const Curl& c = curl();
+    if (!c.ok) {
+        res.status = RC_API_SERVER_RESPONSE_CLIENT_ERROR;
+        return res;
+    }
+    void* h = c.easy_init();
+    if (!h) return res;
+    void* headers = nullptr;
+    if (post_data) headers = c.slist_append(nullptr, ("Content-Type: " + content_type).c_str());
+    using WriteFn = size_t (*)(char*, size_t, size_t, void*);
+    const WriteFn write = [](char* p, size_t sz, size_t n, void* ud) -> size_t {
+        static_cast<std::string*>(ud)->append(p, sz * n);
+        return sz * n;
+    };
+    c.setopt(h, 10002, url.c_str());          // CURLOPT_URL
+    c.setopt(h, 10018, user_agent.c_str());   // CURLOPT_USERAGENT
+    c.setopt(h, 20011, write);                // CURLOPT_WRITEFUNCTION
+    c.setopt(h, 10001, &res.body);            // CURLOPT_WRITEDATA
+    c.setopt(h, 99, 1L);                      // CURLOPT_NOSIGNAL (worker threads)
+    c.setopt(h, 78, 10L);                     // CURLOPT_CONNECTTIMEOUT
+    c.setopt(h, 13, 30L);                     // CURLOPT_TIMEOUT
+    c.setopt(h, 52, 1L);                      // CURLOPT_FOLLOWLOCATION
+    if (post_data) {
+        c.setopt(h, 10015, post_data);        // CURLOPT_POSTFIELDS
+        c.setopt(h, 10023, headers);          // CURLOPT_HTTPHEADER
+    }
+    if (c.perform(h) == 0) {
+        long code = 0;
+        c.getinfo(h, 0x200002, &code);        // CURLINFO_RESPONSE_CODE
+        res.status = static_cast<int>(code);
+    }
+    if (headers) c.slist_free_all(headers);
+    c.easy_cleanup(h);
 #else
     (void)url; (void)post_data; (void)content_type; (void)user_agent;
     res.status = RC_API_SERVER_RESPONSE_CLIENT_ERROR;
@@ -116,8 +188,13 @@ void* RC_CCONV fr_open(const char* path_utf8) {
     return std::fopen(path_utf8, "rb");
 #endif
 }
+#ifdef _WIN32
 void RC_CCONV fr_seek(void* f, int64_t offset, int origin) { _fseeki64(static_cast<FILE*>(f), offset, origin); }
 int64_t RC_CCONV fr_tell(void* f) { return _ftelli64(static_cast<FILE*>(f)); }
+#else
+void RC_CCONV fr_seek(void* f, int64_t offset, int origin) { fseeko(static_cast<FILE*>(f), static_cast<off_t>(offset), origin); }
+int64_t RC_CCONV fr_tell(void* f) { return static_cast<int64_t>(ftello(static_cast<FILE*>(f))); }
+#endif
 size_t RC_CCONV fr_read(void* f, void* buffer, size_t n) { return std::fread(buffer, 1, n, static_cast<FILE*>(f)); }
 void RC_CCONV fr_close(void* f) { std::fclose(static_cast<FILE*>(f)); }
 

@@ -166,11 +166,82 @@ tıklamak yeterlidir (konsol penceresi açılmaz):
 Terminalden başlatılırsa `VagrantStory.exe` günlüğü o terminale yazar. Geliştirme ve hata ayıklama
 seçenekleri için konsol sürümü `build/vs_host.exe` kullanılır.
 
+## Linux, Steam Deck ve Android
+
+Linux ve Android sürümü aynı oyun çekirdeğini SDL3 ile çalıştırır (`tools/sdl_host.cpp`): pencere,
+ses, oyun kolu, dokunmatik tuşlar ve oyun içi menü. Görüntüyü işlemci çizer (Direct3D yok); ekrana
+SDL'nin OpenGL / Vulkan / GLES çizicisiyle verilir. Emülasyon Windows ile bire bir aynıdır (aynı kayıt
+durumundan aynı kareler, bayt bayt).
+
+- **Menü:** Esc, oyun kolunda **L3 + R3** (iki çubuğa birlikte basmak) ya da Guide tuşu, Android'de
+  geri tuşu veya ekranın üstündeki ≡ tuşu. Menüden: durum kaydet / yükle / yuva, ekran oranı,
+  3D genişletme, keskin / yumuşak görüntü, iç çözünürlük (1–4×), PAL 60 Hz, ses, dokunmatik tuşlar,
+  tam ekran, disk değiştirme, çıkış. Oyun menü açıkken durur.
+- **İlk açılış:** Disk ayarlı değilse disk seçme ekranı açılır. Linux / Steam Deck'te pencerenin
+  içinde bir dosya gezgini vardır (Steam'in Oyun Modunda da çalışır); Android'de sistemin dosya
+  seçicisi açılır.
+- **Klavye:** Windows sürümüyle aynı (oklar, Z X A S, Q W E R, Enter, Backspace; F5 / F7 / F6 durum,
+  F8 basılı geri sarma, F3 oran, Shift+F3 3D genişletme, F4 görüntü, M ses, F11 tam ekran, Tab hızlı).
+- **Ayarlar:** Aynı `VagrantStory.ini` biçimi. Linux'ta `~/.local/share/VagrantStory/` klasöründedir
+  (programın yanında `VagrantStory.ini` varsa taşınabilir kullanım için o klasör kullanılır).
+  Kayıtlar, hile dosyası ve doku paketleri (`dokular`) de bu klasöre konur.
+- **RetroAchievements (Linux):** Sistemdeki `libcurl` ile çalışır. Giriş henüz yalnızca Windows'taki
+  ayarlar penceresinden yapılabilir: oradaki `ra_user` / `ra_token` satırlarını Linux'taki ini'ye
+  kopyalamak yeterli. Android'de başarımlar henüz yok.
+
+### Steam Deck
+
+1. Masaüstü Modunda `VagrantStory-Port-…-linux-x64.tar.gz` dosyasını bir klasöre açın.
+2. Steam → Oyun Ekle → Steam Dışı Oyun Ekle ile `VagrantStory` dosyasını ekleyin.
+3. Oyun Modunda başlatın. İlk açılışta disk imajını içerideki dosya gezgininden seçin
+   (`.cue` / `.bin` / `.iso`; PAL için aynı adlı `.sbi` aynı klasörde olmalı).
+
+Deck'te varsayılan tam ekrandır; menü **L3 + R3**. Deck'in kontrolleri Steam Input ile oyun kolu
+olarak gelir (A = ✕, B = ○, X = □, Y = △).
+
+### Android
+
+APK'yı yükleyip açın, **Disk imajı seç** ile `.bin` (ve PAL için `.sbi`) dosyasını seçin; birden
+fazla dosya birlikte seçilebilir. Dosyalar uygulamanın klasörüne bir kez kopyalanır
+(`Android/data/io.github.aligothenburg.vagrantstory/files/`; ayarlar ve kayıtlar da orada).
+`.cue` gerekmez. Ekrana dokununca dokunmatik tuşlar görünür, oyun kolu kullanılınca gizlenir.
+Telefonda varsayılan iç çözünürlük 1×'tir (görüntüyü işlemci çizer); güçlü cihazlarda menüden
+artırılabilir.
+
+**Ana ekran simgesi:** İlk açılışta oyun, açılış videosunun sonundaki Rood Inverse'i arka planda
+kendi diskinizden yakalar (yarım dakika kadar sürer, oyunu yavaşlatmaz) ve telefon "Ana ekrana
+eklensin mi?" diye sorar. Onaylarsanız ana ekranda bu resimle oyunu açan bir kısayol çıkar. Resim
+`kapak.png` olarak uygulama klasörüne kaydedilir; kısayol menüdeki **Ana ekran simgesi** ile
+yeniden istenebilir.
+
 ## Derleme
 
 ```powershell
 ./build.ps1
 ```
+
+**Linux** (SDL3 kaynağını CMake kendisi indirir; `-DVSPORT_SDL_SOURCE_DIR=...` ile yerel bir
+klasör de verilebilir):
+
+```bash
+sudo apt install build-essential cmake ninja-build libasound2-dev libpulse-dev libx11-dev libxext-dev \
+  libxrandr-dev libxcursor-dev libxfixes-dev libxi-dev libxss-dev libxtst-dev libxkbcommon-dev \
+  libwayland-dev wayland-protocols libegl1-mesa-dev libdbus-1-dev libudev-dev libpipewire-0.3-dev libdecor-0-dev
+cmake -S . -B build/linux -G Ninja -DCMAKE_BUILD_TYPE=Release -DVSPORT_LINK_AOT=OFF
+cmake --build build/linux
+```
+
+`build/linux/VagrantStory` oyunun kendisidir (SDL3 ve C++ çalışma kütüphanesi içine bağlıdır;
+yalnızca `glibc` 2.38+ gerekir), `vs_host` başsız test aracıdır.
+
+**Android** (JDK 17 ve Android SDK + NDK 29 gerekir):
+
+```powershell
+cd android
+./gradlew assembleRelease
+```
+
+APK: `android/app/build/outputs/apk/release/app-release.apk` (arm64 ve x86_64).
 
 ## Disk İmajı
 

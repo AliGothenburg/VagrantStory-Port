@@ -177,7 +177,7 @@ void PsxRuntime::serialize_state(StateIO& io, CpuContext& ctx) {
     if (ram_size && !io.saving() && fast_load_) {
         // Runahead: only pages that really differ are written and count as rewritten, so the
         // native code of unchanged pages stays valid (marking all of them is very slow per frame)
-        static std::vector<u8> tmp;
+        thread_local std::vector<u8> tmp;
         tmp.resize(ram_.size());
         io.raw(tmp.data(), tmp.size());
         if (io.ok()) {

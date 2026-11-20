@@ -62,9 +62,15 @@ struct GameSettings {
     bool rewind         = false;  // Keep ~30 s of states in memory; hold F8 to rewind
     bool rumble         = true;   // DualShock vibration (XInput controllers)
     bool show_launcher  = true;   // Show this window on every start (Shift forces it)
+    int  touch_controls = 0;      // On-screen buttons (SDL host): 0 = when the screen is touched, 1 = always, 2 = never
     pad::ButtonMap pad_map = pad::default_button_map(); // Controller button remap
 };
 
+#ifndef _WIN32
+// Linux / Android: the folder that holds the ini, saves, cheats and texture packs
+void set_data_dir(const std::filesystem::path& dir);
+[[nodiscard]] std::filesystem::path data_dir();
+#endif
 [[nodiscard]] std::filesystem::path settings_path();  // VagrantStory.ini next to the exe
 [[nodiscard]] std::filesystem::path cheats_path();    // VagrantStory_hileler.txt next to the exe
 // Texture pack folder next to the exe ("dokular"); dumps go to its "_dokum" subfolder

@@ -1,13 +1,15 @@
 #include "vsport/cdrom_iso.hpp"
 #include "vsport/cheats.hpp"
-#include "vsport/d3d11_renderer.hpp"
 #include "vsport/pad_mapping.hpp"
 #include "vsport/psx_exe.hpp"
 #include "vsport/runtime.hpp"
+#include "launcher_win32.hpp"
+#ifdef _WIN32
+#include "vsport/d3d11_renderer.hpp"
 #include "vsport/win32_audio.hpp"
 #include "vsport/win32_input.hpp"
-#include "launcher_win32.hpp"
 #include "vsport/d3d11_hr_backend.hpp"
+#endif
 #include "achievements.hpp"
 #include "rc_consoles.h"
 #include "rc_hash.h"
@@ -155,6 +157,10 @@ void step_hardware_self_demo(PsxRuntime& rt, float angle_rad) {
     rt.write32(0x1F8010A4u, 0);
     rt.write32(0x1F8010A8u, 0x01000401u); // SyncMode=2 (Linked-List), FromRAM=1, Start=1
 }
+
+#ifndef _WIN32
+void host_log(const char*, ...) {} // Linux: vs_host is headless only (the game is sdl_host.cpp)
+#endif
 
 #ifdef _WIN32
 // Start / shutdown steps of the windowed game, written to VagrantStory.log next to the exe, so a
@@ -727,10 +733,20 @@ int main(int argc, char** argv) {
     // Controller type: DualShock (vibration) unless switched off
     const bool rumble_on = rumble_flag >= 0 ? rumble_flag == 1 : (use_settings ? settings.rumble : false);
     rt.set_pad_dualshock(rumble_on);
+#ifdef _WIN32
     // Graphics card: --adapter, else the settings, else automatic (the most powerful one)
     set_preferred_adapter(have_adapter ? adapter_name : (use_settings ? settings.gpu : std::string()));
+#else
+    (void)have_adapter; (void)sw_present; (void)hidden_window; (void)no_throttle;
+#endif
     // Upscaled picture on the graphics card; on any failure the processor (software) keeps drawing
     const auto use_gpu_hr = [&rt](void* device) {
+#ifndef _WIN32
+        (void)device;
+        std::printf("[vs_host] Ekran karti cizimi bu sistemde yok, islemci kullaniliyor\n");
+        (void)rt;
+        return;
+#else
         std::string err;
         auto b = make_d3d11_hr_backend(device, &err);
         if (b) {
@@ -743,6 +759,7 @@ int main(int argc, char** argv) {
             rt.gpu().set_hr_backend(make_software_hr_backend());
         }
         std::printf("[vs_host] Ekran karti cizimi baslatilamadi (%s), islemci kullaniliyor\n", err.c_str());
+#endif
     };
     if (gpu_hr == 1 && headless && internal_scale > 1u) {
         use_gpu_hr(nullptr); // Headless: an own Direct3D 11 device

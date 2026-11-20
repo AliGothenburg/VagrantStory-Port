@@ -5,6 +5,7 @@
 #include "vsport/d3d11_hr_backend.hpp" // list_graphics_adapters
 
 #include <algorithm>
+#include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <initializer_list>
@@ -79,6 +80,7 @@ GameSettings load_settings(const std::filesystem::path& ini) {
         else if (key == "volume")        s.volume = clamp_int(num, 0, 100);
         else if (key == "show_launcher") s.show_launcher = num != 0;
         else if (key == "rumble")        s.rumble = num != 0;
+        else if (key == "touch_controls") s.touch_controls = clamp_int(num, 0, 2);
         else if (key == "autosave")      s.autosave = num != 0;
         else if (key == "cheats")        s.cheats = num != 0;
         else if (key == "reverb")        s.reverb = num != 0;
@@ -154,6 +156,8 @@ void save_settings(const std::filesystem::path& ini, const GameSettings& s) {
     out << "ra_user=" << s.ra_user << "\n";
     out << "ra_token=" << s.ra_token << "\n";
     out << "texture_dump=" << (s.texture_dump ? 1 : 0) << "\n";
+    out << "# touch_controls: ekran dokunmatik tuslari (Android/Linux) 0=ekrana dokununca 1=her zaman 2=hic\n";
+    out << "touch_controls=" << s.touch_controls << "\n";
     out << "# cpu_overclock: emule edilen islemci hizi, yuzde (100 = orijinal)\n";
     out << "cpu_overclock=" << s.cpu_overclock << "\n";
     out << "# Kontrolcu tuslari: pad_<PS1 tusu>=<kontrolcude o konumdaki tus> (none = atanmamis)\n";
@@ -1060,11 +1064,16 @@ bool run_settings_window(GameSettings& s) { return run_window(s, nullptr); }
 void dump_settings_window(GameSettings s, const std::filesystem::path& dir) { run_window(s, &dir); }
 #else // !_WIN32
 
-void show_message(const std::string&, bool) {}
-std::filesystem::path settings_path() { return "VagrantStory.ini"; }
-std::filesystem::path default_memcard_path() { return "saves/VagrantStory_kart1.mcr"; }
-std::filesystem::path cheats_path() { return "VagrantStory_hileler.txt"; }
-std::filesystem::path texture_pack_dir() { return "dokular"; }
+namespace {
+std::filesystem::path g_data_dir; // Set by the SDL host (empty = current folder)
+}
+void set_data_dir(const std::filesystem::path& dir) { g_data_dir = dir; }
+std::filesystem::path data_dir() { return g_data_dir; }
+void show_message(const std::string& text, bool error) { std::fprintf(error ? stderr : stdout, "%s\n", text.c_str()); }
+std::filesystem::path settings_path() { return g_data_dir / "VagrantStory.ini"; }
+std::filesystem::path default_memcard_path() { return g_data_dir / "saves" / "VagrantStory_kart1.mcr"; }
+std::filesystem::path cheats_path() { return g_data_dir / "VagrantStory_hileler.txt"; }
+std::filesystem::path texture_pack_dir() { return g_data_dir / "dokular"; }
 bool run_settings_window(GameSettings&) { return false; }
 void dump_settings_window(GameSettings, const std::filesystem::path&) {}
 

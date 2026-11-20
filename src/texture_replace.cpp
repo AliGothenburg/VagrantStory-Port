@@ -14,6 +14,13 @@
 #include <wrl/client.h>
 #pragma comment(lib, "windowscodecs.lib")
 #pragma comment(lib, "ole32.lib")
+#else
+#include <cstring>
+#define STB_IMAGE_IMPLEMENTATION
+#define STBI_ONLY_PNG
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "stb_image.h"
+#include "stb_image_write.h"
 #endif
 
 namespace vsport {
@@ -90,8 +97,27 @@ bool save_png(const std::filesystem::path& path, const TexImage& img) {
            SUCCEEDED(frame->Commit()) && SUCCEEDED(enc->Commit());
 }
 #else
-bool load_png(const std::filesystem::path&, TexImage&) { return false; }
-bool save_png(const std::filesystem::path&, const TexImage&) { return false; }
+// Linux / Android: stb_image (public domain, third_party/stb); RGBA byte order matches TexImage on little endian
+bool load_png(const std::filesystem::path& path, TexImage& out) {
+    int w = 0, h = 0, n = 0;
+    stbi_uc* px = stbi_load(path.string().c_str(), &w, &h, &n, 4);
+    if (!px) return false;
+    const bool ok = w > 0 && h > 0 && w <= 16384 && h <= 16384;
+    if (ok) {
+        out.w = static_cast<u32>(w);
+        out.h = static_cast<u32>(h);
+        out.rgba.resize(static_cast<std::size_t>(w) * h);
+        std::memcpy(out.rgba.data(), px, out.rgba.size() * 4u);
+    }
+    stbi_image_free(px);
+    return ok;
+}
+
+bool save_png(const std::filesystem::path& path, const TexImage& img) {
+    if (img.w == 0 || img.h == 0) return false;
+    return stbi_write_png(path.string().c_str(), static_cast<int>(img.w), static_cast<int>(img.h), 4, img.rgba.data(),
+                          static_cast<int>(img.w * 4u)) != 0;
+}
 #endif
 
 namespace {
