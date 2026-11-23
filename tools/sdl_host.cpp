@@ -4,6 +4,7 @@
 // Vulkan / GLES underneath). Settings are the same VagrantStory.ini as on Windows.
 #include "vsport/cdrom_iso.hpp"
 #include "vsport/cheats.hpp"
+#include "vsport/free_camera.hpp"
 #include "vsport/pad_mapping.hpp"
 #include "vsport/psx_exe.hpp"
 #include "vsport/runtime.hpp"
@@ -442,6 +443,15 @@ struct Gamepads {
             if (x > pad::XINPUT_STICK_DEADZONE) p |= pad::RIGHT;
         }
         return pad::apply_button_map(p, map);
+    }
+    // Right stick in [-1, 1] after the dead zone, +y down (the most pushed controller)
+    void right_stick(float& x, float& y) const {
+        x = y = 0.0f;
+        for (SDL_Gamepad* g : pads) {
+            const float gx = FreeCamera::shape(SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_RIGHTX) / 32767.0f, 0.25f);
+            const float gy = FreeCamera::shape(SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_RIGHTY) / 32767.0f, 0.25f);
+            if (gx * gx + gy * gy > x * x + y * y) { x = gx; y = gy; }
+        }
     }
     void rumble(bool small_motor, u8 large) {
         const int s = small_motor ? 1 : 0, l = large;
@@ -1203,6 +1213,7 @@ App::GameEnd App::run_game() {
     rt.gpu().set_perspective_textures(settings.pgxp >= 2);
     rt.gpu().set_rim_light(static_cast<PsxGpu::RimLight>(std::clamp(settings.rim_light, 0, 2)));
 
+    FreeCamera free_cam; // Right stick turns / tilts the field camera
     CheatList cheats;
     if (settings.cheats) {
         std::ifstream in(launcher::cheats_path(), std::ios::binary);
@@ -1329,6 +1340,7 @@ App::GameEnd App::run_game() {
         if (a <= 0.0f) a = d.h > 0 ? d.w / d.h : 4.0f / 3.0f;
         const float k = settings.widescreen ? std::clamp((4.0f / 3.0f) / a, 0.25f, 1.0f) : 1.0f;
         if (rt.gte().widescreen_scale() != k) rt.gte().set_widescreen_scale(k);
+        if (rt.gpu().hud_squash() != k) rt.gpu().set_hud_squash(k); // HUD keeps its shape (upscaled picture)
     };
     const auto request = [&](StateOp op) {
         state_op = op;
@@ -1535,7 +1547,13 @@ App::GameEnd App::run_game() {
             const Draw d = video.draw();
             touch_held = hidden ? 0u : touch.buttons(d.w, d.h);
             pressed |= touch_held;
+            float cam_x = 0.0f, cam_y = 0.0f; // Right stick: free camera
+            if (!hidden) gamepads.right_stick(cam_x, cam_y);
             if (!hidden && (SDL_GetWindowFlags(video.window) & SDL_WINDOW_INPUT_FOCUS)) {
+                if (keys[SDL_SCANCODE_J]) cam_x = -1.0f; // Keyboard camera: J / L turn, I / K tilt
+                if (keys[SDL_SCANCODE_L]) cam_x = 1.0f;
+                if (keys[SDL_SCANCODE_I]) cam_y = -1.0f;
+                if (keys[SDL_SCANCODE_K]) cam_y = 1.0f;
                 struct KeyBind { SDL_Scancode sc; u16 bit; };
                 constexpr KeyBind KEYS[] = {
                     {SDL_SCANCODE_RETURN, pad::START}, {SDL_SCANCODE_BACKSPACE, pad::SELECT},
@@ -1549,6 +1567,7 @@ App::GameEnd App::run_game() {
             }
             rt.set_pad_buttons(static_cast<u16>(~pressed));
             cheats.apply(rt);
+            if (settings.free_camera) free_cam.apply(rt, cam_x, cam_y, rt.video_60hz() ? 60u : 50u);
             if (settings.rumble && !hidden) gamepads.rumble(rt.pad_motor_small(), rt.pad_motor_large());
             if (runahead == 0) audio.pump(rt.spu());
             achievements.do_frame();

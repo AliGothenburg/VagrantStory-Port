@@ -28,6 +28,10 @@ public:
     // Buttons are returned after this remap (default: Xbox/PlayStation layout by position)
     [[nodiscard]] u16 poll();
     void set_button_map(const pad::ButtonMap& map) noexcept { map_ = map; }
+    // Right stick from the last poll(), raw [-1, 1] with +y down (the most pushed controller)
+    void right_stick(float& x, float& y) const noexcept;
+    // Lines about connected controllers (name, ids, axes) also go here, e.g. to the game log
+    void set_log(void (*fn)(const char*)) noexcept;
 
     // Vibration of the connected XInput controllers: PS1 small motor (on/off) and large motor
     // (0..255). Only sends to the controllers when the values change.

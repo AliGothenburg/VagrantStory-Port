@@ -13,8 +13,9 @@ struct TexImage; // texture_replace.hpp
 struct GpuVertex {
     s32 x = 0, y = 0;
     u8 r = 0, g = 0, b = 0;
-    u8 u = 0, v = 0;
+    u16 u = 0, v = 0;          // 0..255 from the GPU; 256 only on sprites turned into polygons (HUD squash)
     bool exact = false;        // fx/fy hold the exact (sub-pixel) GTE position (upscaled picture)
+    bool gte = false;          // x/y came from the GTE recently (3D), see PsxGpu::set_hud_squash
     float fx = 0.0f, fy = 0.0f;
     float fz = 0.0f;           // GTE depth (SZ) of the exact position, for perspective texturing
 };
@@ -35,6 +36,7 @@ struct HrPrim {
     float alpha = 1.0f;                     // Opacity of the result (soft rim light)
     bool mset = false, mcheck = false;      // GP0(E6h) mask state when sent
     bool self_tex = false;                  // 15bpp sprite whose texture is its own draw area
+    bool flat = false;                      // 2D (no vertex from the GTE): HUD, menus, text
     s32 ox[3]{}, oy[3]{};                   // Extra per-vertex offset in upscaled pixels (rim light)
     // Texture replacement (texture_replace.hpp): image sampled instead of the VRAM texels, at
     // ((u - rep_u0) / rep_su, (v - rep_v0) / rep_sv) in 0..1 (u, v in texels of the texture page)

@@ -75,6 +75,14 @@ public:
         return true;
     }
 
+    // GPU: true if the GTE produced this SXY word within the last max_age frames (also when the
+    // word was ambiguous). Used to tell 3D primitives from 2D ones (HUD, menus, text).
+    [[nodiscard]] bool seen(u32 sxy, u32 max_age) const {
+        if (!enabled_) return false;
+        const auto it = map_.find(sxy);
+        return it != map_.end() && frame_ - it->second.frame <= max_age;
+    }
+
 private:
     std::unordered_map<u32, Point> map_;
     u32 frame_ = 0;

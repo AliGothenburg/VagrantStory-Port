@@ -11,6 +11,14 @@ namespace vsport {
 
 namespace {
 
+// A vertex counts as 3D when the GTE produced its screen position within this many frames
+// (geometry is drawn a frame or two after it was computed). Short, so that a HUD vertex rarely
+// lands by chance on a pixel some 3D vertex used.
+constexpr u32 FLAT_GTE_AGE = 2;
+
+// Diagnostics (VSPORT_SHOW_FLAT=1): 2D primitives are drawn magenta in the upscaled picture
+const bool g_show_flat = [] { const char* e = std::getenv("VSPORT_SHOW_FLAT"); return e && *e == '1'; }();
+
 constexpr s32 sign_extend_11(u32 v) noexcept {
     v &= 0x7FFu;
     return (v & 0x400u) ? static_cast<s32>(v | ~0x7FFu) : static_cast<s32>(v);
@@ -541,6 +549,7 @@ void PsxGpu::flush_hr() {
         o.perspective    = persp_tex_;
         o.soft_rim       = rim_mode_ == RimLight::Soft;
         hr_->set_options(o);
+        if (hud_squash_on()) squash_flat_prims();
         hr_->draw(hr_batch_, batch_y1_, batch_y2_, vram_.data());
         if (interp_on_) {
             // Frame interpolation: keep the frame's primitives (as drawn, incl. rim-light shifts)
@@ -556,6 +565,212 @@ void PsxGpu::flush_hr() {
     }
     hr_batch_.clear();
     hr_batch_offs_.clear();
+}
+
+namespace {
+PsxGpu::FlatBox flat_box_of(const HrPrim& p) {
+    if (p.is_rect) return {static_cast<float>(p.rx), static_cast<float>(p.ry),
+                           static_cast<float>(p.rx + p.rw), static_cast<float>(p.ry + p.rh)};
+    PsxGpu::FlatBox b{1e9f, 1e9f, -1e9f, -1e9f};
+    for (const GpuVertex& v : p.v) {
+        b.x1 = std::min(b.x1, static_cast<float>(v.x)); b.x2 = std::max(b.x2, static_cast<float>(v.x));
+        b.y1 = std::min(b.y1, static_cast<float>(v.y)); b.y2 = std::max(b.y2, static_cast<float>(v.y));
+    }
+    return b;
+}
+
+constexpr float FLAT_GAP = 6.0f; // Native pixels between 2D primitives that still belong to one group
+
+bool near_box(const PsxGpu::FlatBox& a, const PsxGpu::FlatBox& b) noexcept {
+    return !(b.x1 > a.x2 + FLAT_GAP || b.x2 < a.x1 - FLAT_GAP || b.y1 > a.y2 + FLAT_GAP || b.y2 < a.y1 - FLAT_GAP);
+}
+
+// Merges boxes that touch (within FLAT_GAP) into groups; returns each box's group box
+std::vector<PsxGpu::FlatBox> group_boxes(const std::vector<PsxGpu::FlatBox>& boxes, std::vector<std::size_t>* of_box) {
+    const std::size_t n = boxes.size();
+    std::vector<std::size_t> parent(n);
+    for (std::size_t i = 0; i < n; ++i) parent[i] = i;
+    const auto find = [&](std::size_t i) {
+        while (parent[i] != i) i = parent[i] = parent[parent[i]];
+        return i;
+    };
+    for (std::size_t i = 0; i < n; ++i) {
+        for (std::size_t j = i + 1; j < n; ++j) {
+            if (near_box(boxes[i], boxes[j])) parent[find(i)] = find(j);
+        }
+    }
+    std::vector<PsxGpu::FlatBox> groups;
+    std::vector<std::size_t> index(n, static_cast<std::size_t>(-1));
+    if (of_box) of_box->assign(n, 0);
+    for (std::size_t i = 0; i < n; ++i) {
+        const std::size_t r = find(i);
+        if (index[r] == static_cast<std::size_t>(-1)) {
+            index[r] = groups.size();
+            groups.push_back(boxes[i]);
+        }
+        PsxGpu::FlatBox& g = groups[index[r]];
+        g = {std::min(g.x1, boxes[i].x1), std::min(g.y1, boxes[i].y1), std::max(g.x2, boxes[i].x2), std::max(g.y2, boxes[i].y2)};
+        if (of_box) (*of_box)[i] = index[r];
+    }
+    // Groups that grew into each other through the merge are merged too (rare; one pass is enough here)
+    return groups;
+}
+} // namespace
+
+void PsxGpu::hud_frame_end() {
+    // Groups of this frame's 2D primitives (the HUD stays put: the next frame narrows each piece
+    // around the centre of its whole group, even when the pieces arrive in separate batches)
+    if (frame_flat_.size() > 2000u) frame_flat_.resize(2000u); // Grouping is quadratic
+    prev_groups_ = group_boxes(frame_flat_, nullptr);
+    if (const char* path = std::getenv("VSPORT_FLAT_LOG"); path && *path) {
+        // Diagnostics: the groups of every picture
+        if (FILE* f = std::fopen(path, "a")) {
+            std::fprintf(f, "vb %u: %zu boxes ->", vb_count_, frame_flat_.size());
+            for (const FlatBox& g : prev_groups_) std::fprintf(f, " [%.0f,%.0f-%.0f,%.0f]", g.x1, g.y1, g.x2, g.y2);
+            std::fprintf(f, "\n  big pieces:");
+            for (const FlatBox& b : frame_flat_) {
+                if (b.x2 - b.x1 > 60.0f || b.y2 - b.y1 > 60.0f) std::fprintf(f, " [%.0f,%.0f-%.0f,%.0f]", b.x1, b.y1, b.x2, b.y2);
+            }
+            std::fprintf(f, "\n");
+            std::fclose(f);
+        }
+    }
+    frame_flat_.clear();
+    cur_groups_.clear();
+}
+
+void PsxGpu::squash_flat_prims() {
+    const float k = hud_squash_;
+    if (frame_flat_.size() > 6000u) hud_frame_end(); // No picture swaps (single-buffered screen)
+    const auto eligible = [](const HrPrim& p) { return p.flat && !p.rim && !p.self_tex; };
+
+    // Anchor (group centre) of every 2D primitive: its group of the previous frame when it lies
+    // inside one, otherwise a group among this batch's own 2D primitives
+    const std::size_t n = hr_batch_.size();
+    std::vector<float> anchor(n, 0.0f);
+    std::vector<u8> squash(n, 0);
+    std::vector<std::size_t> loose;
+    std::vector<FlatBox> loose_boxes;
+    for (std::size_t i = 0; i < n; ++i) {
+        const HrPrim& p = hr_batch_[i];
+        if (!eligible(p)) continue;
+        const FlatBox b = flat_box_of(p);
+        const float area_w = static_cast<float>(p.cx2 - p.cx1 + 1);
+        // A piece as wide as the screen (fade, shadow layer, background) or one reaching past the
+        // drawing area (HUD pieces always lie inside it) is not narrowed and must not join the
+        // pieces it touches into one screen-wide group
+        if (b.x2 - b.x1 >= area_w * 0.8f) continue;
+        if (b.x1 < static_cast<float>(p.cx1) || b.x2 > static_cast<float>(p.cx2 + 1) ||
+            b.y1 < static_cast<float>(p.cy1) || b.y2 > static_cast<float>(p.cy2 + 1)) continue;
+        frame_flat_.push_back(b);
+        loose.push_back(i);
+        loose_boxes.push_back(b);
+    }
+    if (!loose.empty()) {
+        // Groups within this batch; a group lying inside a group of the previous frame (the HUD,
+        // whose pieces may come in several batches) uses that one, so all its pieces agree
+        // Pieces that touch must share one centre (that keeps their layout), also when they come
+        // in different batches of the frame: a batch group touching a group already drawn this
+        // frame takes over its centre
+        std::vector<std::size_t> of_box;
+        const std::vector<FlatBox> groups = group_boxes(loose_boxes, &of_box);
+        std::vector<std::size_t> slot(groups.size());
+        for (std::size_t gi = 0; gi < groups.size(); ++gi) {
+            const FlatBox& g = groups[gi];
+            std::size_t found = cur_groups_.size();
+            for (std::size_t c = 0; c < cur_groups_.size(); ++c) {
+                if (near_box(cur_groups_[c].box, g)) { found = c; break; }
+            }
+            if (found < cur_groups_.size()) {
+                FlatGroup& cg = cur_groups_[found];
+                cg.box = {std::min(cg.box.x1, g.x1), std::min(cg.box.y1, g.y1), std::max(cg.box.x2, g.x2), std::max(cg.box.y2, g.y2)};
+            } else {
+                // New this frame: centre of its whole group of the previous frame when it lies in one
+                FlatBox whole = g;
+                for (const FlatBox& pg : prev_groups_) {
+                    if (g.x1 >= pg.x1 - 1.0f && g.x2 <= pg.x2 + 1.0f && g.y1 >= pg.y1 - 1.0f && g.y2 <= pg.y2 + 1.0f) {
+                        whole = pg;
+                        break;
+                    }
+                }
+                const HrPrim& p = hr_batch_[loose[0]];
+                const float area_w = static_cast<float>(p.cx2 - p.cx1 + 1);
+                cur_groups_.push_back({g, (whole.x1 + whole.x2) * 0.5f, (whole.x2 - whole.x1) < area_w * 0.8f});
+            }
+            slot[gi] = found < cur_groups_.size() ? found : cur_groups_.size() - 1;
+        }
+        for (std::size_t m = 0; m < loose.size(); ++m) {
+            const FlatGroup& cg = cur_groups_[slot[of_box[m]]];
+            anchor[loose[m]] = cg.anchor;
+            squash[loose[m]] = cg.squash ? 1 : 0;
+        }
+    }
+
+    std::vector<HrPrim> out;
+    std::vector<std::array<s32, 2>> out_offs;
+    out.reserve(n + 16u);
+    out_offs.reserve(n + 16u);
+    for (std::size_t i = 0; i < n; ++i) {
+        HrPrim p = hr_batch_[i];
+        if (!eligible(p)) {
+            out.push_back(p);
+            out_offs.push_back(hr_batch_offs_[i]);
+            continue;
+        }
+        if (g_show_flat) {
+            p.textured = false; p.shaded = false; p.repl = nullptr;
+            p.cr = 255; p.cg = 0; p.cb = 255;
+            for (GpuVertex& v : p.v) { v.r = 255; v.g = 0; v.b = 255; }
+        }
+        const float ax = anchor[i];
+        const auto sx = [&](float x) { return ax + (x - ax) * k; };
+        if (!squash[i]) {
+            out.push_back(p);
+            out_offs.push_back(hr_batch_offs_[i]);
+            continue;
+        }
+        if (!p.is_rect) {
+            for (GpuVertex& v : p.v) {
+                v.exact = true;
+                v.fx = sx(static_cast<float>(v.x));
+                v.fy = static_cast<float>(v.y);
+                v.fz = 0.0f;
+            }
+            out.push_back(p);
+            out_offs.push_back(hr_batch_offs_[i]);
+            continue;
+        }
+        // A sprite becomes two triangles with exact corners (texels 1:1 along the sprite as before)
+        if (p.textured && (p.bu + p.rw > 256 || p.bv + p.rh > 256)) {
+            out.push_back(p); // Texture wraps inside the sprite: keep it as it is
+            out_offs.push_back(hr_batch_offs_[i]);
+            continue;
+        }
+        HrPrim t = p;
+        t.is_rect = false;
+        t.shaded  = false;
+        GpuVertex c[4];
+        const s32 xs[4] = {p.rx, p.rx + p.rw, p.rx, p.rx + p.rw};
+        const s32 ys[4] = {p.ry, p.ry, p.ry + p.rh, p.ry + p.rh};
+        const u16 us[4] = {p.bu, static_cast<u16>(p.bu + p.rw), p.bu, static_cast<u16>(p.bu + p.rw)};
+        const u16 vs[4] = {p.bv, p.bv, static_cast<u16>(p.bv + p.rh), static_cast<u16>(p.bv + p.rh)};
+        for (int q = 0; q < 4; ++q) {
+            c[q].x = xs[q]; c[q].y = ys[q];
+            c[q].r = p.cr; c[q].g = p.cg; c[q].b = p.cb;
+            c[q].u = us[q]; c[q].v = vs[q];
+            c[q].exact = true;
+            c[q].fx = sx(static_cast<float>(xs[q]));
+            c[q].fy = static_cast<float>(ys[q]);
+        }
+        t.v[0] = c[0]; t.v[1] = c[1]; t.v[2] = c[2];
+        out.push_back(t);
+        out_offs.push_back(hr_batch_offs_[i]);
+        t.v[0] = c[1]; t.v[1] = c[2]; t.v[2] = c[3];
+        out.push_back(t);
+        out_offs.push_back(hr_batch_offs_[i]);
+    }
+    hr_batch_.swap(out);
+    hr_batch_offs_.swap(out_offs);
 }
 
 void PsxGpu::set_internal_scale(u32 scale) {
@@ -607,6 +822,9 @@ void PsxGpu::rasterize_triangle(const Vertex& v0, const Vertex& v1_in, const Ver
         p.clut    = clut_word;
         p.texpage = texpage_word;
         p.rim     = hr_rim_;
+        // 3D needs at least two corners from the GTE: a 2D piece placed at a projected point (a
+        // damage number) has one corner there and the others offset by the game
+        p.flat    = (v0.gte ? 1 : 0) + (v1_in.gte ? 1 : 0) + (v2_in.gte ? 1 : 0) < 2;
         hr_queue(p, std::min({v0.x, v1_in.x, v2_in.x}), std::min({v0.y, v1_in.y, v2_in.y}),
                  std::max({v0.x, v1_in.x, v2_in.x}), std::max({v0.y, v1_in.y, v2_in.y}));
     }
@@ -738,6 +956,7 @@ void PsxGpu::dispatch_gp0_packet() {
             verts[i].x = sign_extend_11(xy & 0xFFFFu) + draw_off_x_;
             verts[i].y = sign_extend_11(xy >> 16) + draw_off_y_;
             if (pgxp_ && hr_scale_ > 1u) {
+                verts[i].gte = pgxp_->seen(xy, FLAT_GTE_AGE);
                 PgxpCache::Point pt;
                 if (pgxp_->lookup(xy, pt)) {
                     verts[i].exact = true;
@@ -835,6 +1054,9 @@ void PsxGpu::dispatch_gp0_packet() {
             p.bu = base_u; p.bv = base_v;
             p.clut    = clut_word;
             p.texpage = texpage_;
+            // Sprites are always 2D here: the game draws 3D only with polygons, and effects placed
+            // at a projected point (damage numbers) must be narrowed together with their other pieces
+            p.flat    = true;
             hr_queue(p, rx, ry, rx + rw - 1, ry + rh - 1);
         }
         {
@@ -1182,6 +1404,10 @@ void PsxGpu::interp_on_swap() {
     const u32 interval = vb_count_ - last_swap_vb_;
     last_swap_vb_ = vb_count_;
     alt_shown_ = false;
+    if (hud_squash_on()) {
+        flush_hr();
+        hud_frame_end();
+    }
     if (!interp_on_ || hr_scale_ <= 1u || !hr_) {
         interp_clear();
         return;

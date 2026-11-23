@@ -53,8 +53,10 @@ tıklamak yeterlidir (konsol penceresi açılmaz):
     değeriyle yapılır (köşelerin ~%90'ı); aynı piksele düşen birden fazla nokta varsa o köşe
     orijinal konumunda kalır. Oyunun kendisi ve orijinal (1×) görüntü değişmez.
   - **3D sahneyi orana göre genişlet:** açıksa geniş oranlarda 3D sahne esnetilmez, yanlara
-    doğru daha fazlası görünür (denenen sahnelerde kenarlarda boşluk görülmedi; 2D yazılar ve
-    göstergeler ise yatayda esner). Kapalıysa görüntü seçilen orana esnetilir.
+    doğru daha fazlası görünür (denenen sahnelerde kenarlarda boşluk görülmedi). 2D yazılar ve
+    göstergeler (HP/MP, menüler, hasar sayıları, efektler) iç çözünürlük 2× ve üstündeyken
+    esnetilmez: her parça grubu kendi yerinde kalıp asıl oranına daraltılır. 1×'te ve
+    "Köşe hassasiyeti" kapalıyken 2D öğeler yine esner. Kapalıysa görüntü seçilen orana esnetilir.
   - Pencere kipinde pencere seçilen oranı korur (kenarından sürükleyince ve F3 ile oran
     değiştirince), bu yüzden etrafta siyah bant kalmaz. Tam ekranda ekranınızın oranını seçin
     (ör. 16:9 monitörde 16:9) ya da "doldur"u kullanın. Tam sayı ölçekleme yalnızca 1× iç
@@ -331,6 +333,13 @@ ABD sürümünde (SLUS-01040) bu koruma yoktur.
    | L2 / R2 | `E` / `R` | LT / RT | L2 / R2 |
    | START | `Enter` | Menu (Start) | Options |
    | SELECT | `Backspace` | View (Back) | Share / Create |
+   | Serbest kamera | `J` / `L` döndür, `I` / `K` eğ | sağ çubuk | sağ çubuk |
+
+   **Serbest kamera:** Sağ çubuk kamerayı oyunun 45 derecelik L1/R1 adımlarına bağlı kalmadan
+   istediğiniz açıya döndürür (sağ-sol) ve eğer (yukarı-aşağı). Yürüyüş yönü kameraya uyar; L1/R1
+   yine çalışır ve en yakın 45 derecelik açıya oturur. Kamera yalnızca sağ çubuğa dokunduğunuzda ve
+   oyun alan kamerasını kullanırken değişir (başlık ekranında hiçbir şey yapmaz). **Kontroller** sayfasından
+   kapatılabilir (`free_camera=0`). Avrupa ve ABD sürümlerinde çalışır.
 
    Kontrolcü tuşları ayar penceresindeki **Kontroller** sayfasından değiştirilebilir
    (`VagrantStory.ini` içinde `pad_cross=circle` gibi satırlar olarak saklanır).

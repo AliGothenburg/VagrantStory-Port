@@ -1,5 +1,6 @@
 #include "vsport/cdrom_iso.hpp"
 #include "vsport/cheats.hpp"
+#include "vsport/free_camera.hpp"
 #include "vsport/pad_mapping.hpp"
 #include "vsport/psx_exe.hpp"
 #include "vsport/runtime.hpp"
@@ -228,6 +229,7 @@ struct Win32HostState {
     void apply_gte_widening(HWND hwnd) const {
         const float k = widescreen ? std::clamp((4.0f / 3.0f) / picture_aspect(hwnd), 0.25f, 1.0f) : 1.0f;
         if (rt && rt->gte().widescreen_scale() != k) rt->gte().set_widescreen_scale(k);
+        if (rt && rt->gpu().hud_squash() != k) rt->gpu().set_hud_squash(k); // HUD keeps its shape
     }
     bool fullscreen         = false;
     bool hidden             = false; // --hidden test window: never shown, not even in fullscreen
@@ -441,6 +443,8 @@ int main(int argc, char** argv) {
     std::string adapter_name;  // --adapter NAME: graphics card (empty = settings / automatic)
     bool have_adapter = false;
     bool hidden_window = false; // --hidden
+    int aspect_flag = -1;       // --aspect N: picture aspect index (4 = 16:9), -1 = from settings
+    int widescreen_flag = -1;   // --widescreen 0/1: widen the 3D view (Shift+F3), -1 = from settings
     bool no_throttle = false;   // --no-throttle
     std::string window_dump_path; // --window-dump FILE N
     u32 window_dump_frame = 0;
@@ -461,7 +465,8 @@ int main(int argc, char** argv) {
     bool depth_flag = false;
     int texture_filter = -1; // --texfilter (1) / --texfilter-sharp (2); -1 = from settings / off
     // Scripted headless input: --press BUTTON@VBLANK[:FRAMES][,...] (e.g. START@560,CROSS@900:4)
-    struct ScriptedPress { u16 bits; u32 at_vblank; u32 frames; };
+    // RS_LEFT / RS_RIGHT / RS_UP / RS_DOWN push the right stick fully (camera tests)
+    struct ScriptedPress { u16 bits; u32 at_vblank; u32 frames; float sx = 0.0f, sy = 0.0f; };
     std::vector<ScriptedPress> presses;
     const auto parse_presses = [&](const std::string& spec) -> bool {
         struct Name { const char* n; u16 bit; };
@@ -471,6 +476,8 @@ int main(int argc, char** argv) {
             {"L1", pad::L1}, {"R1", pad::R1}, {"TRIANGLE", pad::TRIANGLE}, {"CIRCLE", pad::CIRCLE},
             {"CROSS", pad::CROSS}, {"SQUARE", pad::SQUARE},
         };
+        struct Stick { const char* n; float x, y; };
+        constexpr Stick STICKS[] = {{"RS_LEFT", -1.0f, 0.0f}, {"RS_RIGHT", 1.0f, 0.0f}, {"RS_UP", 0.0f, -1.0f}, {"RS_DOWN", 0.0f, 1.0f}};
         std::size_t pos = 0;
         while (pos < spec.size()) {
             const std::size_t end  = std::min(spec.find(',', pos), spec.size());
@@ -482,11 +489,15 @@ int main(int argc, char** argv) {
             for (const auto& n : NAMES) {
                 if (name == n.n) bit = n.bit;
             }
-            if (bit == 0) return false;
+            const Stick* stick = nullptr;
+            for (const auto& s : STICKS) {
+                if (name == s.n) stick = &s;
+            }
+            if (bit == 0 && stick == nullptr) return false;
             char* rest = nullptr;
             const u32 vb = static_cast<u32>(std::strtoul(item.c_str() + at + 1, &rest, 10));
             const u32 frames = (rest && *rest == ':') ? static_cast<u32>(std::strtoul(rest + 1, nullptr, 10)) : 8u;
-            presses.push_back({bit, vb, frames});
+            presses.push_back({bit, vb, frames, stick ? stick->x : 0.0f, stick ? stick->y : 0.0f});
             pos = end + 1;
         }
         return true;
@@ -536,6 +547,10 @@ int main(int argc, char** argv) {
             texture_filter = 2;
         } else if (arg == "--hidden") {
             hidden_window = true; // Tests: invisible window, no real input
+        } else if (arg == "--aspect" && i + 1 < argc) {
+            aspect_flag = std::atoi(argv[++i]);
+        } else if (arg == "--widescreen" && i + 1 < argc) {
+            widescreen_flag = std::atoi(argv[++i]) != 0 ? 1 : 0;
         } else if (arg == "--no-throttle") {
             no_throttle = true;   // Tests: run as fast as possible instead of real time
         } else if (arg == "--window-dump" && i + 2 < argc) {
@@ -733,6 +748,14 @@ int main(int argc, char** argv) {
     // Controller type: DualShock (vibration) unless switched off
     const bool rumble_on = rumble_flag >= 0 ? rumble_flag == 1 : (use_settings ? settings.rumble : false);
     rt.set_pad_dualshock(rumble_on);
+    const bool free_cam_on = use_settings ? settings.free_camera : true;
+    FreeCamera free_cam;
+#ifdef _WIN32
+    host_log("Serbest kamera: %s", free_cam_on ? "acik (sag cubuk, J/L/I/K)" : "kapali");
+#endif
+    bool cam_log_pushed = false; // Game log of right-stick pushes (see the vblank callback)
+    FreeCamera::Status cam_log_status = FreeCamera::Status::Idle;
+    int cam_log_lines = 0;
 #ifdef _WIN32
     // Graphics card: --adapter, else the settings, else automatic (the most powerful one)
     set_preferred_adapter(have_adapter ? adapter_name : (use_settings ? settings.gpu : std::string()));
@@ -1036,6 +1059,8 @@ int main(int argc, char** argv) {
         host_state.aspect     = std::clamp(settings.aspect, 0, launcher::ASPECT_COUNT - 1);
         host_state.widescreen = settings.widescreen;
     }
+    if (aspect_flag >= 0) host_state.aspect = std::clamp(aspect_flag, 0, launcher::ASPECT_COUNT - 1);
+    if (widescreen_flag >= 0) host_state.widescreen = widescreen_flag == 1;
     int client_h = use_settings ? settings.window_height : 720;
     RECT work{};
     SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
@@ -1095,6 +1120,7 @@ int main(int argc, char** argv) {
     }
     host_log("Ses: %s", audio.is_open() ? audio.backend() : "acilamadi");
     Win32GamepadInput gamepad;
+    gamepad.set_log([](const char* line) { host_log("%s", line); });
     gamepad.initialize(hwnd);
     host_log("Kontrolcu girisi hazir");
     std::printf("[vs_host] Gamepad destegi aktif (XInput + DirectInput); kontrolcu istediginiz an takilabilir.\n");
@@ -1245,10 +1271,26 @@ int main(int argc, char** argv) {
         // Keyboard (only while the game window has focus) + gamepads, merged as active-high
         // PS1 bits, then inverted to the pad's active-low format
         u16 pressed = hidden_window ? 0u : gamepad.poll(); // Hidden test window: no real input
+        float cam_x = 0.0f, cam_y = 0.0f;                  // Right stick (free camera)
+        float raw_x = 0.0f, raw_y = 0.0f;
+        if (!hidden_window) {
+            gamepad.right_stick(raw_x, raw_y);
+            cam_x = FreeCamera::shape(raw_x, 0.25f);
+            cam_y = FreeCamera::shape(raw_y, 0.25f);
+        }
         for (const auto& pr : presses) {                    // Scripted --press, as in headless mode
-            if (rt.vblank_count() >= pr.at_vblank && rt.vblank_count() < pr.at_vblank + pr.frames) pressed |= pr.bits;
+            if (rt.vblank_count() >= pr.at_vblank && rt.vblank_count() < pr.at_vblank + pr.frames) {
+                pressed |= pr.bits;
+                if (pr.sx != 0.0f) cam_x = pr.sx;
+                if (pr.sy != 0.0f) cam_y = pr.sy;
+            }
         }
         if (!hidden_window && GetForegroundWindow() == hwnd) {
+            // Keyboard camera: J / L turn, I / K tilt
+            if ((GetAsyncKeyState('J') & 0x8000) != 0) cam_x = -1.0f;
+            if ((GetAsyncKeyState('L') & 0x8000) != 0) cam_x = 1.0f;
+            if ((GetAsyncKeyState('I') & 0x8000) != 0) cam_y = -1.0f;
+            if ((GetAsyncKeyState('K') & 0x8000) != 0) cam_y = 1.0f;
             struct KeyBind { int vk; u16 bit; };
             constexpr KeyBind KEYS[] = {
                 {VK_RETURN, pad::START}, {VK_BACK, pad::SELECT},
@@ -1262,6 +1304,20 @@ int main(int argc, char** argv) {
         }
         rt.set_pad_buttons(static_cast<u16>(~pressed));
         cheats.apply(rt);
+        if (free_cam_on) free_cam.apply(rt, cam_x, cam_y, rt.video_60hz() ? 60u : 50u);
+        {
+            // Game log: each push of the right stick (or J/L/I/K), with the raw stick and what the
+            // camera did, so a controller that does not turn it can be told apart from the game
+            const bool pushed = cam_x != 0.0f || cam_y != 0.0f || raw_x * raw_x + raw_y * raw_y > 0.09f;
+            const FreeCamera::Status st = free_cam_on ? free_cam.status() : FreeCamera::Status::Idle;
+            if (pushed && (!cam_log_pushed || st != cam_log_status) && cam_log_lines < 200) {
+                ++cam_log_lines;
+                host_log("Sag cubuk: ham x=%.2f y=%.2f, kullanilan x=%.2f y=%.2f -> %s", raw_x, raw_y, cam_x, cam_y,
+                         free_cam_on ? FreeCamera::status_text(st) : "serbest kamera ayarlardan kapali");
+            }
+            cam_log_pushed = pushed;
+            cam_log_status = st;
+        }
         if (rumble_on && !hidden_window) gamepad.set_rumble(rt.pad_motor_small(), rt.pad_motor_large());
 
         // Stream synthesized PS1 SPU 44.1 kHz Stereo PCM to Windows audio ring buffer (runahead:

@@ -67,16 +67,30 @@ struct Win32GamepadInput::Impl {
     std::array<ULONGLONG, XUSER_MAX_COUNT> xi_next_probe{};
     WORD rumble_left = 0, rumble_right = 0; // Last vibration sent
 
+    // Right stick of the last poll, [-1, 1], +y down; the most pushed controller wins
+    float rx = 0.0f, ry = 0.0f;
+    void take_right(float x, float y) {
+        if (x * x + y * y > rx * rx + ry * ry) { rx = x; ry = y; }
+    }
+
     // DirectInput (first non-XInput game controller)
     IDirectInput8W* di = nullptr;
     IDirectInputDevice8W* di_dev = nullptr;
     std::string di_name;
     ULONGLONG di_next_probe = 0;
+    // Right stick: Z / Rz (DualShock 4, DualSense) or Rx / Ry (Switch Pro Controller and others).
+    // An axis counts only if it rested at the center on the first read: on the DualShock 4 Rx / Ry
+    // are the triggers (resting at one end), which must never turn the camera.
+    bool di_first_read = true;
+    bool di_axis_ok[4] = {}; // Z, Rz, Rx, Ry
+    bool di_nintendo = false; // Nintendo controller (only noted in the log for now)
+    void (*log)(const char*) = nullptr;
 
     struct EnumCtx {
         std::set<DWORD> xinput_ids;
         bool found = false;
         GUID guid{};
+        GUID product{};
         std::wstring name;
     };
 
@@ -86,8 +100,9 @@ struct Win32GamepadInput::Impl {
             return DIENUM_CONTINUE; // Handled by XInput
         }
         ctx->found = true;
-        ctx->guid  = inst->guidInstance;
-        ctx->name  = inst->tszProductName;
+        ctx->guid    = inst->guidInstance;
+        ctx->product = inst->guidProduct;
+        ctx->name    = inst->tszProductName;
         return DIENUM_STOP;
     }
 
@@ -125,9 +140,26 @@ struct Win32GamepadInput::Impl {
         dev->Acquire();
 
         di_dev  = dev;
+        di_first_read = true;
+        for (bool& ok : di_axis_ok) ok = false;
         di_name = narrow(ctx.name.c_str());
-        std::printf("[vs_host] Gamepad baglandi: DirectInput (%s)\n", di_name.c_str());
+        di_nintendo = LOWORD(ctx.product.Data1) == 0x057Eu; // Nintendo vendor id
+        // Which axes the controller has (written to the log to help with new controllers)
+        std::string axes;
+        const struct { DWORD ofs; const char* name; } AXES[] = {
+            {DIJOFS_X, "X"}, {DIJOFS_Y, "Y"}, {DIJOFS_Z, "Z"}, {DIJOFS_RX, "Rx"}, {DIJOFS_RY, "Ry"}, {DIJOFS_RZ, "Rz"}};
+        for (const auto& a : AXES) {
+            DIDEVICEOBJECTINSTANCEW oi{};
+            oi.dwSize = sizeof(oi);
+            if (SUCCEEDED(dev->GetObjectInfo(&oi, a.ofs, DIPH_BYOFFSET))) axes += std::string(axes.empty() ? "" : " ") + a.name;
+        }
+        char line[512];
+        std::snprintf(line, sizeof(line), "Kontrolcu baglandi: DirectInput (%s), VID %04X PID %04X, eksenler: %s%s",
+                      di_name.c_str(), LOWORD(ctx.product.Data1), HIWORD(ctx.product.Data1), axes.c_str(),
+                      di_nintendo ? " (Nintendo)" : "");
+        std::printf("[vs_host] %s\n", line);
         std::fflush(stdout);
+        if (log) log(line);
     }
 
     u16 poll_dinput(ULONGLONG now) {
@@ -152,6 +184,14 @@ struct Win32GamepadInput::Impl {
             di_next_probe = now + PROBE_INTERVAL_MS;
             return 0;
         }
+        const float v[4] = {js.lZ / 1000.0f, js.lRz / 1000.0f, js.lRx / 1000.0f, js.lRy / 1000.0f};
+        if (di_first_read) {
+            di_first_read = false;
+            for (int i = 0; i < 4; ++i) di_axis_ok[i] = v[i] > -0.2f && v[i] < 0.2f;
+        }
+        const auto axis = [&](int i) { return di_axis_ok[i] ? v[i] : 0.0f; };
+        take_right(axis(0), axis(1)); // Z / Rz
+        take_right(axis(2), axis(3)); // Rx / Ry
         return pad::map_dinput(static_cast<u32>(js.rgdwPOV[0]), js.lX, js.lY,
                                js.rgbButtons, sizeof(js.rgbButtons));
     }
@@ -168,9 +208,15 @@ struct Win32GamepadInput::Impl {
                     xi_connected[slot] = true;
                     std::printf("[vs_host] Gamepad baglandi: XInput #%lu\n", slot + 1);
                     std::fflush(stdout);
+                    if (log) {
+                        char line[64];
+                        std::snprintf(line, sizeof(line), "Kontrolcu baglandi: XInput #%lu", slot + 1);
+                        log(line);
+                    }
                 }
                 const XINPUT_GAMEPAD& g = st.Gamepad;
                 pressed |= pad::map_xinput(g.wButtons, g.bLeftTrigger, g.bRightTrigger, g.sThumbLX, g.sThumbLY);
+                take_right(static_cast<float>(g.sThumbRX) / 32767.0f, -static_cast<float>(g.sThumbRY) / 32767.0f); // XInput: +Y up
             } else {
                 if (xi_connected[slot]) {
                     xi_connected[slot] = false;
@@ -216,8 +262,16 @@ void Win32GamepadInput::shutdown() {
 
 u16 Win32GamepadInput::poll() {
     const ULONGLONG now = GetTickCount64();
+    impl_->rx = impl_->ry = 0.0f;
     return pad::apply_button_map(static_cast<u16>(impl_->poll_xinput(now) | impl_->poll_dinput(now)), map_);
 }
+
+void Win32GamepadInput::right_stick(float& x, float& y) const noexcept {
+    x = impl_->rx;
+    y = impl_->ry;
+}
+
+void Win32GamepadInput::set_log(void (*fn)(const char*)) noexcept { impl_->log = fn; }
 
 void Win32GamepadInput::set_rumble(bool small_motor, u8 large_motor) {
     if (!impl_) return;
@@ -243,6 +297,8 @@ Win32GamepadInput::~Win32GamepadInput() = default;
 bool Win32GamepadInput::initialize(void*) { return false; }
 void Win32GamepadInput::shutdown() {}
 u16 Win32GamepadInput::poll() { return 0; }
+void Win32GamepadInput::right_stick(float& x, float& y) const noexcept { x = y = 0.0f; }
+void Win32GamepadInput::set_log(void (*)(const char*)) noexcept {}
 void Win32GamepadInput::set_rumble(bool, u8) {}
 } // namespace vsport
 

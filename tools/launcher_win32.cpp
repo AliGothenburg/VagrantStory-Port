@@ -80,6 +80,7 @@ GameSettings load_settings(const std::filesystem::path& ini) {
         else if (key == "volume")        s.volume = clamp_int(num, 0, 100);
         else if (key == "show_launcher") s.show_launcher = num != 0;
         else if (key == "rumble")        s.rumble = num != 0;
+        else if (key == "free_camera")   s.free_camera = num != 0;
         else if (key == "touch_controls") s.touch_controls = clamp_int(num, 0, 2);
         else if (key == "autosave")      s.autosave = num != 0;
         else if (key == "cheats")        s.cheats = num != 0;
@@ -135,6 +136,8 @@ void save_settings(const std::filesystem::path& ini, const GameSettings& s) {
     out << "show_launcher=" << (s.show_launcher ? 1 : 0) << "\n";
     out << "# rumble: titresim (DualShock; XInput kontrolculer)\n";
     out << "rumble=" << (s.rumble ? 1 : 0) << "\n";
+    out << "# free_camera: sag cubukla serbest kamera (klavye J/L/I/K)\n";
+    out << "free_camera=" << (s.free_camera ? 1 : 0) << "\n";
     out << "# autosave: cikarken durumu kaydet, acilista kaldigin yerden devam et; rewind: F8 ile geri sarma\n";
     out << "autosave=" << (s.autosave ? 1 : 0) << "\n";
     out << "rewind=" << (s.rewind ? 1 : 0) << "\n";
@@ -268,7 +271,7 @@ enum ControlId : int {
     ID_RES_COMBO, ID_TEXFILTER_CHECK,
     ID_CARD_EDIT, ID_CARD_CHANGE, ID_CARD_OPEN,
     ID_MUTE_CHECK, ID_VOLUME_SLIDER, ID_VOLUME_LABEL,
-    ID_SHOW_CHECK, ID_ASPECT_COMBO, ID_RIM_COMBO, ID_PGXP_COMBO, ID_RENDERER_COMBO, ID_GPU_COMBO, ID_RUMBLE_CHECK, ID_OVERCLOCK_COMBO, ID_AUTOSAVE_CHECK, ID_REWIND_CHECK, ID_CHEATS_CHECK, ID_CHEATS_OPEN, ID_REVERB_CHECK, ID_CUBIC_CHECK, ID_TEXPACK_CHECK, ID_TEXPACK_OPEN, ID_TEXDUMP_CHECK, ID_INTERP_CHECK, ID_RUNAHEAD_COMBO, ID_RA_CHECK, ID_RA_USER, ID_RA_PASS, ID_RA_LOGIN, ID_RA_LOGOUT, ID_RA_STATUS, ID_PAL60_CHECK,
+    ID_SHOW_CHECK, ID_ASPECT_COMBO, ID_RIM_COMBO, ID_PGXP_COMBO, ID_RENDERER_COMBO, ID_GPU_COMBO, ID_RUMBLE_CHECK, ID_FREECAM_CHECK,ID_OVERCLOCK_COMBO, ID_AUTOSAVE_CHECK, ID_REWIND_CHECK, ID_CHEATS_CHECK, ID_CHEATS_OPEN, ID_REVERB_CHECK, ID_CUBIC_CHECK, ID_TEXPACK_CHECK, ID_TEXPACK_OPEN, ID_TEXDUMP_CHECK, ID_INTERP_CHECK, ID_RUNAHEAD_COMBO, ID_RA_CHECK, ID_RA_USER, ID_RA_PASS, ID_RA_LOGIN, ID_RA_LOGOUT, ID_RA_STATUS, ID_PAL60_CHECK,
     ID_PAD_COMBO0 = 300, // .. ID_PAD_COMBO0 + REMAP_COUNT - 1
     ID_PAD_DEFAULTS = 400,
     ID_NAV0 = 500,       // .. ID_NAV0 + PAGE_COUNT - 1: page buttons on the left
@@ -596,6 +599,8 @@ void build_controls(LauncherState& st) {
     y += PAD_ROWS * 32 + 8;
     make(st, L"BUTTON", L"Varsayılana döndür", BS_PUSHBUTTON | tab, LX, y, 150, 28, ID_PAD_DEFAULTS);
     add_check(st, L"Titreşim (Xbox / XInput uyumlu kontrolcüler)", LX + 180, y + 4, IW - 180, 20, ID_RUMBLE_CHECK, s.rumble);
+    y += 36;
+    add_check(st, L"Sağ çubukla serbest kamera (klavyede J / L döndür, I / K eğ)", LX, y, IW, 20, ID_FREECAM_CHECK, s.free_camera);
     pad_select(st, s.pad_map);
 
     // --- Gelişmiş: emulation tweaks ---
@@ -697,6 +702,7 @@ void read_controls(LauncherState& st) {
     s.volume        = clamp_int(static_cast<int>(SendMessageW(item(st, ID_VOLUME_SLIDER), TBM_GETPOS, 0, 0)), 0, 100);
     s.show_launcher = SendMessageW(item(st, ID_SHOW_CHECK), BM_GETCHECK, 0, 0) == BST_CHECKED;
     s.rumble        = SendMessageW(item(st, ID_RUMBLE_CHECK), BM_GETCHECK, 0, 0) == BST_CHECKED;
+    s.free_camera   = SendMessageW(item(st, ID_FREECAM_CHECK), BM_GETCHECK, 0, 0) == BST_CHECKED;
     s.autosave      = SendMessageW(item(st, ID_AUTOSAVE_CHECK), BM_GETCHECK, 0, 0) == BST_CHECKED;
     s.cheats        = SendMessageW(item(st, ID_CHEATS_CHECK), BM_GETCHECK, 0, 0) == BST_CHECKED;
     s.texture_pack  = SendMessageW(item(st, ID_TEXPACK_CHECK), BM_GETCHECK, 0, 0) == BST_CHECKED;

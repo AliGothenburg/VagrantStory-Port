@@ -2,6 +2,7 @@
 #include "vsport/mips_decoder.hpp"
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 namespace vsport {
@@ -38,6 +39,37 @@ static TraceEntry g_trace_ring[64];
 static u32 g_trace_pos = 0;
 static TraceEntry g_call_ring[64];
 static u32 g_call_pos = 0;
+
+#ifdef VSPORT_RESEARCH
+// Research build: VSPORT_WATCH=8011FA00-8011FCFF (hex, physical or KSEG0) logs every CPU write
+// into that range to VSPORT_WATCH_FILE (default vsport_watch.txt) with the writing PC and RA.
+// Interpreter only: native (AOT) code does not report its PC.
+namespace {
+struct RamWatch {
+    u32 lo = 1, hi = 0;
+    FILE* f = nullptr;
+    RamWatch() {
+        const char* spec = std::getenv("VSPORT_WATCH");
+        if (!spec || !*spec) return;
+        char* end = nullptr;
+        lo = static_cast<u32>(std::strtoul(spec, &end, 16)) & 0x1FFFFFu;
+        hi = (end && *end == '-') ? static_cast<u32>(std::strtoul(end + 1, nullptr, 16)) & 0x1FFFFFu : lo;
+        const char* path = std::getenv("VSPORT_WATCH_FILE");
+        f = std::fopen(path && *path ? path : "vsport_watch.txt", "w");
+    }
+    ~RamWatch() { if (f) std::fclose(f); }
+};
+RamWatch g_ram_watch;
+inline void watch_write(u32 paddr, u32 size, u32 val, u32 vblank) {
+    if (!g_ram_watch.f || paddr + size <= g_ram_watch.lo || paddr > g_ram_watch.hi) return;
+    const TraceEntry& t = g_trace_ring[(g_trace_pos - 1u) & 63u];
+    std::fprintf(g_ram_watch.f, "vb %u: %08X <- %08X (%u bytes) pc %08X ra %08X\n", vblank, 0x80000000u | paddr, val, size, t.pc, t.ra);
+}
+} // namespace
+#define VSPORT_WATCH_WRITE(paddr, size, val) watch_write(paddr, size, val, vblank_frames_)
+#else
+#define VSPORT_WATCH_WRITE(paddr, size, val) ((void)0)
+#endif
 
 PsxRuntime::PsxRuntime(u32 ram_size)
     : ram_(ram_size, 0), bios_(PSX_BIOS_SIZE, 0) {
@@ -228,6 +260,7 @@ void PsxRuntime::write8(u32 vaddr, u8 val) {
     if (paddr < ram_.size()) {
         ram_[paddr] = val;
         if (++ram_page_epoch_[paddr >> 12] == 0) ram_page_epoch_[paddr >> 12] = 1u;
+        VSPORT_WATCH_WRITE(paddr, 1u, val);
         return;
     }
     if (paddr >= PSX_SCRATCHPAD_PHYS && paddr < PSX_SCRATCHPAD_PHYS + PSX_SCRATCHPAD_SIZE) {
@@ -246,6 +279,7 @@ void PsxRuntime::write16(u32 vaddr, u16 val) {
         const u32 p0 = paddr >> 12, p1 = (paddr + 1u) >> 12;
         if (++ram_page_epoch_[p0] == 0) ram_page_epoch_[p0] = 1u;
         if (p1 != p0 && ++ram_page_epoch_[p1] == 0) ram_page_epoch_[p1] = 1u;
+        VSPORT_WATCH_WRITE(paddr, 2u, val);
         return;
     }
     if (paddr >= PSX_SCRATCHPAD_PHYS && paddr + 1 < PSX_SCRATCHPAD_PHYS + PSX_SCRATCHPAD_SIZE) {
@@ -264,6 +298,7 @@ void PsxRuntime::write32(u32 vaddr, u32 val) {
         const u32 p0 = paddr >> 12, p1 = (paddr + 3u) >> 12;
         if (++ram_page_epoch_[p0] == 0) ram_page_epoch_[p0] = 1u;
         if (p1 != p0 && ++ram_page_epoch_[p1] == 0) ram_page_epoch_[p1] = 1u;
+        VSPORT_WATCH_WRITE(paddr, 4u, val);
         return;
     }
     if (paddr >= PSX_SCRATCHPAD_PHYS && paddr + 3 < PSX_SCRATCHPAD_PHYS + PSX_SCRATCHPAD_SIZE) {

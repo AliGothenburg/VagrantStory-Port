@@ -1,6 +1,7 @@
 #include "vsport/cdrom_iso.hpp"
 #include "vsport/cfg_lifter.hpp"
 #include "vsport/cheats.hpp"
+#include "vsport/free_camera.hpp"
 #include "vsport/gte.hpp"
 #include "vsport/memcard.hpp"
 #include "vsport/mips_decoder.hpp"
@@ -766,6 +767,34 @@ void test_cheat_codes() {
     CHECK(rt.read16(0x80010022u) == 0xAAAAu && rt.read8(0x80010031u) == 0x77u, "Met conditions run the next line");
 }
 
+// Right-stick camera: writes only with the expected program code and an active field camera
+void test_free_camera() {
+    CHECK(FreeCamera::shape(0.2f, 0.25f) == 0.0f && FreeCamera::shape(1.0f, 0.25f) == 1.0f &&
+              FreeCamera::shape(-1.0f, 0.25f) == -1.0f, "Stick dead zone and full tilt");
+
+    PsxRuntime rt;
+    const u32 C = FreeCamera::CAMERA;
+    rt.write32(C + 0x00u, 0x800u); rt.write32(C + 0x14u, 0x800u);
+    rt.write32(C + 0x04u, static_cast<u32>(-384)); rt.write32(C + 0x08u, 0x600u);
+    rt.write32(C + 0x1Cu, 1u); rt.write32(C + 0x2Cu, 0x8011F9F0u);
+
+    FreeCamera cam;
+    rt.write32(0x8006DDDCu, 0x3C02800Fu); rt.write32(0x8006DDE0u, 0x24431234u); // Another engine (title)
+    CHECK(!cam.apply(rt, 1.0f, 0.0f, 50u) && rt.read32(C) == 0x800u, "Engine not loaded: camera left alone");
+    CHECK(cam.status() == FreeCamera::Status::OtherProgram, "Status says why");
+
+    rt.write32(0x8006DDE0u, 0x244319D0u); // BATTLE.PRG loaded later: the same object must work now
+    CHECK(cam.apply(rt, 1.0f, 0.0f, 50u), "Field camera turns");
+    CHECK(rt.read32(C) == 0x800u + 41u && rt.read32(C + 0x14u) == 0x800u + 41u, "Yaw and its target move together");
+    for (int i = 0; i < 100; ++i) cam.apply(rt, 0.0f, -1.0f, 50u);
+    CHECK(static_cast<s32>(rt.read32(C + 0x04u)) == FreeCamera::PITCH_MIN, "Tilt stops at its limit");
+    CHECK(!cam.apply(rt, 0.0f, 0.0f, 50u), "Stick at rest writes nothing");
+
+    rt.write32(C + 0x1Cu, 0u); // Title screen, menus: field camera off
+    const u32 yaw = rt.read32(C);
+    CHECK(!cam.apply(rt, 1.0f, 0.0f, 50u) && rt.read32(C) == yaw, "Inactive camera is not touched");
+}
+
 // GP1(03h) display off: the picture must be black (the game hides VRAM set-up before movies)
 void test_gpu_display_off_is_black() {
     PsxGpu gpu;
@@ -1146,6 +1175,7 @@ int main() {
     test_gpu_perspective_textures();
     test_save_state_round_trip();
     test_cheat_codes();
+    test_free_camera();
     test_gpu_display_off_is_black();
     test_gpu_otc_and_dma_linked_list();
     test_interpreter_and_lifter_pipeline();

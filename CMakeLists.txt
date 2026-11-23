@@ -19,6 +19,7 @@ add_library(vsport_core STATIC
     src/psx_cdrom.cpp
     src/savestate.cpp
     src/cheats.cpp
+    src/free_camera.cpp
     src/texture_replace.cpp
     src/psx_exe.cpp
     src/mips_decoder.cpp
@@ -35,6 +36,11 @@ add_library(vsport_core STATIC
 target_include_directories(vsport_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
+# Research build only (never for release): VSPORT_WATCH=lo-hi logs CPU writes to that RAM range
+option(VSPORT_RESEARCH "Research build: RAM write watch (VSPORT_WATCH / VSPORT_WATCH_FILE)" OFF)
+if(VSPORT_RESEARCH)
+    target_compile_definitions(vsport_core PUBLIC VSPORT_RESEARCH=1)
+endif()
 # PNG reading / writing for texture packs outside Windows (stb, public domain)
 target_include_directories(vsport_core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party/stb)
 if(NOT MSVC)

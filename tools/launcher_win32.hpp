@@ -61,6 +61,7 @@ struct GameSettings {
     bool autosave       = false;  // Save the machine state on exit and continue from it on the next start
     bool rewind         = false;  // Keep ~30 s of states in memory; hold F8 to rewind
     bool rumble         = true;   // DualShock vibration (XInput controllers)
+    bool free_camera    = true;   // Right stick turns / tilts the field camera (vsport/free_camera.hpp)
     bool show_launcher  = true;   // Show this window on every start (Shift forces it)
     int  touch_controls = 0;      // On-screen buttons (SDL host): 0 = when the screen is touched, 1 = always, 2 = never
     pad::ButtonMap pad_map = pad::default_button_map(); // Controller button remap
