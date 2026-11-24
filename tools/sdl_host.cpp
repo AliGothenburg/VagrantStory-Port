@@ -44,7 +44,7 @@ namespace fs = std::filesystem;
 
 namespace {
 
-constexpr const char* VERSION = "0.3.1";
+constexpr const char* VERSION = "0.3.2";
 
 // ---------------------------------------------------------------------------------------------
 // Log: VagrantStory.log in the data folder, plus SDL_Log (console / Android logcat)
