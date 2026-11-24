@@ -1,4 +1,4 @@
-// SDL3 host: Linux / Steam Deck and Android (also builds on Windows, for testing).
+﻿// SDL3 host: Linux / Steam Deck and Android (also builds on Windows, for testing).
 // Window, sound, controllers, touch buttons and an in-game menu through SDL3; the picture is
 // drawn by the processor (software upscaled picture) and shown with SDL's renderer (OpenGL /
 // Vulkan / GLES underneath). Settings are the same VagrantStory.ini as on Windows.
@@ -448,8 +448,8 @@ struct Gamepads {
     void right_stick(float& x, float& y) const {
         x = y = 0.0f;
         for (SDL_Gamepad* g : pads) {
-            const float gx = FreeCamera::shape(SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_RIGHTX) / 32767.0f, 0.25f);
-            const float gy = FreeCamera::shape(SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_RIGHTY) / 32767.0f, 0.25f);
+            const float gx = FreeCamera::shape(SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_RIGHTX) / 32767.0f, 0.2f);
+            const float gy = FreeCamera::shape(SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_RIGHTY) / 32767.0f, 0.2f);
             if (gx * gx + gy * gy > x * x + y * y) { x = gx; y = gy; }
         }
     }
@@ -1364,7 +1364,8 @@ App::GameEnd App::run_game() {
         };
         it.push_back({"Durum yuvasi", [&] { return std::to_string(slot); }, [&](int dir) { slot = (slot - 1 + (dir < 0 ? 4 : 1)) % 5 + 1; }});
         it.push_back({"Ekran orani", [&] { return std::string(launcher::ASPECT_NAMES[std::clamp(settings.aspect, 0, launcher::ASPECT_COUNT - 1)]); },
-                      [&](int dir) { settings.aspect = (settings.aspect + (dir < 0 ? launcher::ASPECT_COUNT - 1 : 1)) % launcher::ASPECT_COUNT; }});
+                      [&](int dir) { settings.aspect = (settings.aspect + (dir < 0 ? launcher::ASPECT_COUNT - 1 : 1)) % launcher::ASPECT_COUNT;
+                                     settings.widescreen = settings.aspect != 0; }});
         it.push_back({"3D genislet", [&] { return std::string(settings.widescreen ? "Acik" : "Kapali"); },
                       [&](int) { settings.widescreen = !settings.widescreen; }});
         it.push_back({"Goruntu", [&] { return std::string(settings.filter == 0 ? "Keskin" : "Yumusak"); }, [&](int) {
@@ -1497,7 +1498,10 @@ App::GameEnd App::run_game() {
                             break;
                         case SDL_SCANCODE_F3:
                             if (e.key.mod & SDL_KMOD_SHIFT) settings.widescreen = !settings.widescreen;
-                            else settings.aspect = (settings.aspect + 1) % launcher::ASPECT_COUNT;
+                            else {
+                                settings.aspect = (settings.aspect + 1) % launcher::ASPECT_COUNT;
+                                settings.widescreen = settings.aspect != 0; // Wider ratio = wider view
+                            }
                             show_notice(std::string("Oran: ") + launcher::ASPECT_NAMES[settings.aspect] + (settings.widescreen ? " (3D genis)" : ""));
                             break;
                         case SDL_SCANCODE_F4:

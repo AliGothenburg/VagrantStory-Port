@@ -1,4 +1,4 @@
-#include <cmath>
+﻿#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include "vsport/psx_gpu.hpp"
@@ -568,151 +568,48 @@ void PsxGpu::flush_hr() {
 }
 
 namespace {
-PsxGpu::FlatBox flat_box_of(const HrPrim& p) {
-    if (p.is_rect) return {static_cast<float>(p.rx), static_cast<float>(p.ry),
-                           static_cast<float>(p.rx + p.rw), static_cast<float>(p.ry + p.rh)};
-    PsxGpu::FlatBox b{1e9f, 1e9f, -1e9f, -1e9f};
+// Native bounding box of a primitive
+void prim_box(const HrPrim& p, float& x1, float& y1, float& x2, float& y2) noexcept {
+    if (p.is_rect) {
+        x1 = static_cast<float>(p.rx); y1 = static_cast<float>(p.ry);
+        x2 = static_cast<float>(p.rx + p.rw); y2 = static_cast<float>(p.ry + p.rh);
+        return;
+    }
+    x1 = y1 = 1e9f; x2 = y2 = -1e9f;
     for (const GpuVertex& v : p.v) {
-        b.x1 = std::min(b.x1, static_cast<float>(v.x)); b.x2 = std::max(b.x2, static_cast<float>(v.x));
-        b.y1 = std::min(b.y1, static_cast<float>(v.y)); b.y2 = std::max(b.y2, static_cast<float>(v.y));
+        x1 = std::min(x1, static_cast<float>(v.x)); x2 = std::max(x2, static_cast<float>(v.x));
+        y1 = std::min(y1, static_cast<float>(v.y)); y2 = std::max(y2, static_cast<float>(v.y));
     }
-    return b;
-}
-
-constexpr float FLAT_GAP = 6.0f; // Native pixels between 2D primitives that still belong to one group
-
-bool near_box(const PsxGpu::FlatBox& a, const PsxGpu::FlatBox& b) noexcept {
-    return !(b.x1 > a.x2 + FLAT_GAP || b.x2 < a.x1 - FLAT_GAP || b.y1 > a.y2 + FLAT_GAP || b.y2 < a.y1 - FLAT_GAP);
-}
-
-// Merges boxes that touch (within FLAT_GAP) into groups; returns each box's group box
-std::vector<PsxGpu::FlatBox> group_boxes(const std::vector<PsxGpu::FlatBox>& boxes, std::vector<std::size_t>* of_box) {
-    const std::size_t n = boxes.size();
-    std::vector<std::size_t> parent(n);
-    for (std::size_t i = 0; i < n; ++i) parent[i] = i;
-    const auto find = [&](std::size_t i) {
-        while (parent[i] != i) i = parent[i] = parent[parent[i]];
-        return i;
-    };
-    for (std::size_t i = 0; i < n; ++i) {
-        for (std::size_t j = i + 1; j < n; ++j) {
-            if (near_box(boxes[i], boxes[j])) parent[find(i)] = find(j);
-        }
-    }
-    std::vector<PsxGpu::FlatBox> groups;
-    std::vector<std::size_t> index(n, static_cast<std::size_t>(-1));
-    if (of_box) of_box->assign(n, 0);
-    for (std::size_t i = 0; i < n; ++i) {
-        const std::size_t r = find(i);
-        if (index[r] == static_cast<std::size_t>(-1)) {
-            index[r] = groups.size();
-            groups.push_back(boxes[i]);
-        }
-        PsxGpu::FlatBox& g = groups[index[r]];
-        g = {std::min(g.x1, boxes[i].x1), std::min(g.y1, boxes[i].y1), std::max(g.x2, boxes[i].x2), std::max(g.y2, boxes[i].y2)};
-        if (of_box) (*of_box)[i] = index[r];
-    }
-    // Groups that grew into each other through the merge are merged too (rare; one pass is enough here)
-    return groups;
 }
 } // namespace
 
-void PsxGpu::hud_frame_end() {
-    // Groups of this frame's 2D primitives (the HUD stays put: the next frame narrows each piece
-    // around the centre of its whole group, even when the pieces arrive in separate batches)
-    if (frame_flat_.size() > 2000u) frame_flat_.resize(2000u); // Grouping is quadratic
-    prev_groups_ = group_boxes(frame_flat_, nullptr);
-    if (const char* path = std::getenv("VSPORT_FLAT_LOG"); path && *path) {
-        // Diagnostics: the groups of every picture
-        if (FILE* f = std::fopen(path, "a")) {
-            std::fprintf(f, "vb %u: %zu boxes ->", vb_count_, frame_flat_.size());
-            for (const FlatBox& g : prev_groups_) std::fprintf(f, " [%.0f,%.0f-%.0f,%.0f]", g.x1, g.y1, g.x2, g.y2);
-            std::fprintf(f, "\n  big pieces:");
-            for (const FlatBox& b : frame_flat_) {
-                if (b.x2 - b.x1 > 60.0f || b.y2 - b.y1 > 60.0f) std::fprintf(f, " [%.0f,%.0f-%.0f,%.0f]", b.x1, b.y1, b.x2, b.y2);
-            }
-            std::fprintf(f, "\n");
-            std::fclose(f);
-        }
-    }
-    frame_flat_.clear();
-    cur_groups_.clear();
-}
-
 void PsxGpu::squash_flat_prims() {
+    // The 2D layer (HUD, menus, text, menu backgrounds) is narrowed by k around the centre of the
+    // drawing area, as one piece: it keeps the original 4:3 layout in the middle of the wider
+    // picture while the 3D view around it is widened. (Narrowing each group of pieces around its
+    // own centre kept the HUD at the screen edges, but menus made of separate bars fell apart.)
     const float k = hud_squash_;
-    if (frame_flat_.size() > 6000u) hud_frame_end(); // No picture swaps (single-buffered screen)
-    const auto eligible = [](const HrPrim& p) { return p.flat && !p.rim && !p.self_tex; };
-
-    // Anchor (group centre) of every 2D primitive: its group of the previous frame when it lies
-    // inside one, otherwise a group among this batch's own 2D primitives
     const std::size_t n = hr_batch_.size();
-    std::vector<float> anchor(n, 0.0f);
-    std::vector<u8> squash(n, 0);
-    std::vector<std::size_t> loose;
-    std::vector<FlatBox> loose_boxes;
-    for (std::size_t i = 0; i < n; ++i) {
-        const HrPrim& p = hr_batch_[i];
-        if (!eligible(p)) continue;
-        const FlatBox b = flat_box_of(p);
-        const float area_w = static_cast<float>(p.cx2 - p.cx1 + 1);
-        // A piece as wide as the screen (fade, shadow layer, background) or one reaching past the
-        // drawing area (HUD pieces always lie inside it) is not narrowed and must not join the
-        // pieces it touches into one screen-wide group
-        if (b.x2 - b.x1 >= area_w * 0.8f) continue;
-        if (b.x1 < static_cast<float>(p.cx1) || b.x2 > static_cast<float>(p.cx2 + 1) ||
-            b.y1 < static_cast<float>(p.cy1) || b.y2 > static_cast<float>(p.cy2 + 1)) continue;
-        frame_flat_.push_back(b);
-        loose.push_back(i);
-        loose_boxes.push_back(b);
-    }
-    if (!loose.empty()) {
-        // Groups within this batch; a group lying inside a group of the previous frame (the HUD,
-        // whose pieces may come in several batches) uses that one, so all its pieces agree
-        // Pieces that touch must share one centre (that keeps their layout), also when they come
-        // in different batches of the frame: a batch group touching a group already drawn this
-        // frame takes over its centre
-        std::vector<std::size_t> of_box;
-        const std::vector<FlatBox> groups = group_boxes(loose_boxes, &of_box);
-        std::vector<std::size_t> slot(groups.size());
-        for (std::size_t gi = 0; gi < groups.size(); ++gi) {
-            const FlatBox& g = groups[gi];
-            std::size_t found = cur_groups_.size();
-            for (std::size_t c = 0; c < cur_groups_.size(); ++c) {
-                if (near_box(cur_groups_[c].box, g)) { found = c; break; }
-            }
-            if (found < cur_groups_.size()) {
-                FlatGroup& cg = cur_groups_[found];
-                cg.box = {std::min(cg.box.x1, g.x1), std::min(cg.box.y1, g.y1), std::max(cg.box.x2, g.x2), std::max(cg.box.y2, g.y2)};
-            } else {
-                // New this frame: centre of its whole group of the previous frame when it lies in one
-                FlatBox whole = g;
-                for (const FlatBox& pg : prev_groups_) {
-                    if (g.x1 >= pg.x1 - 1.0f && g.x2 <= pg.x2 + 1.0f && g.y1 >= pg.y1 - 1.0f && g.y2 <= pg.y2 + 1.0f) {
-                        whole = pg;
-                        break;
-                    }
-                }
-                const HrPrim& p = hr_batch_[loose[0]];
-                const float area_w = static_cast<float>(p.cx2 - p.cx1 + 1);
-                cur_groups_.push_back({g, (whole.x1 + whole.x2) * 0.5f, (whole.x2 - whole.x1) < area_w * 0.8f});
-            }
-            slot[gi] = found < cur_groups_.size() ? found : cur_groups_.size() - 1;
-        }
-        for (std::size_t m = 0; m < loose.size(); ++m) {
-            const FlatGroup& cg = cur_groups_[slot[of_box[m]]];
-            anchor[loose[m]] = cg.anchor;
-            squash[loose[m]] = cg.squash ? 1 : 0;
-        }
-    }
-
     std::vector<HrPrim> out;
     std::vector<std::array<s32, 2>> out_offs;
     out.reserve(n + 16u);
     out_offs.reserve(n + 16u);
     for (std::size_t i = 0; i < n; ++i) {
         HrPrim p = hr_batch_[i];
-        if (!eligible(p)) {
+        bool squash = p.flat && !p.rim && !p.self_tex;
+        if (squash) {
+            float x1, y1, x2, y2;
+            prim_box(p, x1, y1, x2, y2);
+            const float area_w = static_cast<float>(p.cx2 - p.cx1 + 1);
+            // A one-colour layer as wide as the screen (fade, darkening behind a menu) must keep
+            // covering all of it. Menu bars that run past the side of the screen, or slide in from
+            // it, belong to the layer like the rest (left out, they were stretched apart from their
+            // own bars); only pieces wider than the screen or leaving it at the top / bottom are
+            // no 2D layer pieces.
+            if (!p.textured && x2 - x1 >= area_w * 0.8f) squash = false;
+            if (x2 - x1 > area_w || y1 < static_cast<float>(p.cy1) || y2 > static_cast<float>(p.cy2 + 1)) squash = false;
+        }
+        if (!squash) {
             out.push_back(p);
             out_offs.push_back(hr_batch_offs_[i]);
             continue;
@@ -722,14 +619,15 @@ void PsxGpu::squash_flat_prims() {
             p.cr = 255; p.cg = 0; p.cb = 255;
             for (GpuVertex& v : p.v) { v.r = 255; v.g = 0; v.b = 255; }
         }
-        const float ax = anchor[i];
+        const float ax = static_cast<float>(p.cx1 + p.cx2 + 1) * 0.5f;
         const auto sx = [&](float x) { return ax + (x - ax) * k; };
-        if (!squash[i]) {
-            out.push_back(p);
-            out_offs.push_back(hr_batch_offs_[i]);
-            continue;
-        }
+        // The drawing area narrows with it: what lay outside the screen (the rest of a menu bar
+        // still sliding in) must stay hidden instead of being pulled into view
+        const s32 clip_x1 = static_cast<s32>(std::ceil(sx(static_cast<float>(p.cx1))));
+        const s32 clip_x2 = static_cast<s32>(std::floor(sx(static_cast<float>(p.cx2 + 1)))) - 1;
         if (!p.is_rect) {
+            p.cx1 = clip_x1;
+            p.cx2 = clip_x2;
             for (GpuVertex& v : p.v) {
                 v.exact = true;
                 v.fx = sx(static_cast<float>(v.x));
@@ -749,6 +647,8 @@ void PsxGpu::squash_flat_prims() {
         HrPrim t = p;
         t.is_rect = false;
         t.shaded  = false;
+        t.cx1 = clip_x1;
+        t.cx2 = clip_x2;
         GpuVertex c[4];
         const s32 xs[4] = {p.rx, p.rx + p.rw, p.rx, p.rx + p.rw};
         const s32 ys[4] = {p.ry, p.ry, p.ry + p.rh, p.ry + p.rh};
@@ -772,7 +672,6 @@ void PsxGpu::squash_flat_prims() {
     hr_batch_.swap(out);
     hr_batch_offs_.swap(out_offs);
 }
-
 void PsxGpu::set_internal_scale(u32 scale) {
     scale = std::clamp<u32>(scale, 1u, MAX_INTERNAL_SCALE);
     if (scale == hr_scale_ && (scale == 1u || hr_)) return;
@@ -1404,10 +1303,6 @@ void PsxGpu::interp_on_swap() {
     const u32 interval = vb_count_ - last_swap_vb_;
     last_swap_vb_ = vb_count_;
     alt_shown_ = false;
-    if (hud_squash_on()) {
-        flush_hr();
-        hud_frame_end();
-    }
     if (!interp_on_ || hr_scale_ <= 1u || !hr_) {
         interp_clear();
         return;
@@ -1443,26 +1338,106 @@ void PsxGpu::interp_on_swap() {
             }
         }
         std::vector<HrOp> mid = rec_cur_.ops;
-        u32 total = 0, matched = 0;
+        // Each group of primitives with the same identity may move as a whole (a menu or the map
+        // sliding in): the shift of its bounding box is the second guess besides "not moved", so
+        // look-alike neighbours (the one-colour map triangles) are not taken for each other when
+        // the group moves farther than they are apart.
+        struct Box { float x1 = 1e9f, y1 = 1e9f, x2 = -1e9f, y2 = -1e9f; void add(float x, float y) { x1 = std::min(x1, x); y1 = std::min(y1, y); x2 = std::max(x2, x); y2 = std::max(y2, y); } };
+        std::unordered_map<u64, std::array<Box, 2>> boxes; // [0] previous picture, [1] new picture
+        for (const auto& kv : index) {
+            Box& b = boxes[kv.first][0];
+            for (u32 k : kv.second) b.add(prev[k].cx, prev[k].cy);
+        }
+        for (std::size_t o = 0; o < mid.size(); ++o) {
+            for (std::size_t i = 0; i < mid[o].prims.size() && !mid[o].fill; ++i) {
+                const u64 key = interp_key(mid[o].prims[i]);
+                if (!index.count(key)) continue;
+                float cx, cy;
+                prim_centre(mid[o].prims[i], cx, cy);
+                boxes[key][1].add(cx - static_cast<float>(rec_cur_.offs[o][i][0]), cy - static_cast<float>(rec_cur_.offs[o][i][1]));
+            }
+        }
+        // Corners of the new picture that lie within a pixel of each other form one group and all
+        // get the same in-between move: polygons sharing a corner (exactly, or one exact and one
+        // rounded) stay joined, or a crack opens between them (a matched floor tile moving halfway
+        // next to an unmatched one staying put)
+        struct Group { float x, y; u32 kind; float dx = 0.0f, dy = 0.0f; u32 n = 0; };
+        std::vector<Group> groups;
+        std::unordered_map<u64, std::vector<u32>> group_cells; // 1-px cell -> groups whose corner is in it
+        std::vector<u32> corner_group;                         // Per corner of every polygon, in op order
+        const auto cell_key = [](s32 cx, s32 cy) noexcept {
+            return (static_cast<u64>(static_cast<u32>(cx)) << 32) | static_cast<u32>(cy);
+        };
+        for (std::size_t o = 0; o < mid.size(); ++o) {
+            const HrOp& op = mid[o];
+            for (std::size_t i = 0; i < op.prims.size() && !op.fill; ++i) {
+                const HrPrim& q = op.prims[i];
+                if (q.is_rect) continue;
+                // Only polygons of one kind share corners (a one-colour map over a textured floor
+                // must not take the floor's move)
+                const u32 kind = (q.textured ? 1u : 0u) | (q.semi ? 2u : 0u) | (q.rim ? 4u : 0u);
+                for (int v = 0; v < 3; ++v) {
+                    const float x = vpos_x(q.v[v]) + static_cast<float>(rec_cur_.offs[o][i][0]);
+                    const float y = vpos_y(q.v[v]) + static_cast<float>(rec_cur_.offs[o][i][1]);
+                    const s32 cx = static_cast<s32>(std::floor(x)), cy = static_cast<s32>(std::floor(y));
+                    u32 g = UINT32_MAX;
+                    for (s32 ny = cy - 1; ny <= cy + 1 && g == UINT32_MAX; ++ny) {
+                        for (s32 nx = cx - 1; nx <= cx + 1 && g == UINT32_MAX; ++nx) {
+                            const auto it = group_cells.find(cell_key(nx, ny));
+                            if (it == group_cells.end()) continue;
+                            for (u32 k : it->second) {
+                                if (groups[k].kind == kind && std::abs(groups[k].x - x) <= 1.0f && std::abs(groups[k].y - y) <= 1.0f) { g = k; break; }
+                            }
+                        }
+                    }
+                    if (g == UINT32_MAX) {
+                        g = static_cast<u32>(groups.size());
+                        groups.push_back(Group{x, y, kind});
+                        group_cells[cell_key(cx, cy)].push_back(g);
+                    }
+                    corner_group.push_back(g);
+                }
+            }
+        }
+        std::vector<u32> prim_first(0);  // Index of the first corner of each polygon, filled in order
+        u32 corner_pos = 0;        u32 total = 0, matched = 0;
         for (std::size_t o = 0; o < mid.size(); ++o) {
             HrOp& op = mid[o];
             for (std::size_t i = 0; i < op.prims.size() && !op.fill; ++i) {
                 HrPrim& q = op.prims[i];
                 ++total;
-                const auto it = index.find(interp_key(q));
+                const u32 c0 = corner_pos;
+                if (!q.is_rect) corner_pos += 3u;
+                const u64 key = interp_key(q);
+                const auto it = index.find(key);
                 if (it == index.end()) continue;
                 const s32 qox = rec_cur_.offs[o][i][0], qoy = rec_cur_.offs[o][i][1];
                 float qcx, qcy;
                 prim_centre(q, qcx, qcy);
                 qcx -= static_cast<float>(qox);
                 qcy -= static_cast<float>(qoy);
-                // Same primitive in the previous frame: the nearest unused one with the same identity
+                const std::array<Box, 2>& bx = boxes[key];
+                const float gx = (bx[1].x1 + bx[1].x2 - bx[0].x1 - bx[0].x2) * 0.5f;
+                const float gy = (bx[1].y1 + bx[1].y2 - bx[0].y1 - bx[0].y2) * 0.5f;
+                // Same primitive in the previous picture: the unused one with the same identity whose
+                // corners best fit this one's, either where it was or moved with its group
                 Ref* best = nullptr;
                 float best_d = 0.0f;
                 for (u32 k : it->second) {
                     Ref& r = prev[k];
                     if (r.used) continue;
-                    const float d = std::abs(r.cx - qcx) + std::abs(r.cy - qcy);
+                    float d = std::abs(r.cx - qcx) + std::abs(r.cy - qcy);
+                    if (!q.is_rect) {
+                        float d0 = 0.0f, d1 = 0.0f;
+                        const float odx = static_cast<float>(qox - r.ox), ody = static_cast<float>(qoy - r.oy);
+                        for (int v = 0; v < 3; ++v) {
+                            const float ex = vpos_x(q.v[v]) - vpos_x(r.p->v[v]) - odx;
+                            const float ey = vpos_y(q.v[v]) - vpos_y(r.p->v[v]) - ody;
+                            d0 += std::abs(ex) + std::abs(ey);
+                            d1 += std::abs(ex - gx) + std::abs(ey - gy);
+                        }
+                        d = std::min(d0, d1) / 3.0f;
+                    }
                     if (!best || d < best_d) { best = &r; best_d = d; }
                 }
                 if (!best) continue;
@@ -1471,17 +1446,67 @@ void PsxGpu::interp_on_swap() {
                 if (q.is_rect) continue; // Sprites (text, gauges) stay where they are
                 const HrPrim& a = *best->p;
                 const float dx = static_cast<float>(qox - best->ox), dy = static_cast<float>(qoy - best->oy); // Into this frame's coordinates
-                float ax[3], ay[3], maxd = 0.0f;
+                float ax[3], ay[3], mdx[3], mdy[3], maxd = 0.0f;
                 for (int v = 0; v < 3; ++v) {
                     ax[v] = vpos_x(a.v[v]) + dx;
                     ay[v] = vpos_y(a.v[v]) + dy;
-                    maxd = std::max({maxd, std::abs(ax[v] - vpos_x(q.v[v])), std::abs(ay[v] - vpos_y(q.v[v]))});
+                    mdx[v] = vpos_x(q.v[v]) - ax[v];
+                    mdy[v] = vpos_y(q.v[v]) - ay[v];
+                    maxd = std::max({maxd, std::abs(mdx[v]), std::abs(mdy[v])});
                 }
-                if (maxd > 48.0f) continue; // Too far for the same polygon: probably another one
+                if (maxd > 96.0f) continue; // Too far for the same polygon: probably another one
+                // The corners of one polygon move together (turning or growing a little between two
+                // pictures). Corners that go different ways belong to another polygon of the same
+                // look (the one-colour map triangles): halfway would be a shard, so it stays put.
+                {
+                    const float mx = (mdx[0] + mdx[1] + mdx[2]) / 3.0f, my = (mdy[0] + mdy[1] + mdy[2]) / 3.0f;
+                    float spread = 0.0f;
+                    for (int v = 0; v < 3; ++v) spread = std::max({spread, std::abs(mdx[v] - mx), std::abs(mdy[v] - my)});
+                    const float qx1 = std::min({vpos_x(q.v[0]), vpos_x(q.v[1]), vpos_x(q.v[2])});
+                    const float qx2 = std::max({vpos_x(q.v[0]), vpos_x(q.v[1]), vpos_x(q.v[2])});
+                    const float qy1 = std::min({vpos_y(q.v[0]), vpos_y(q.v[1]), vpos_y(q.v[2])});
+                    const float qy2 = std::max({vpos_y(q.v[0]), vpos_y(q.v[1]), vpos_y(q.v[2])});
+                    if (spread > 1.5f + 0.35f * std::max(qx2 - qx1, qy2 - qy1)) continue;
+                }
                 for (int v = 0; v < 3; ++v) {
                     GpuVertex& b = q.v[v];
-                    const float mx = (ax[v] + vpos_x(b)) * 0.5f, my = (ay[v] + vpos_y(b)) * 0.5f;
-                    b.fz = (a.v[v].exact && b.exact) ? (a.v[v].fz + b.fz) * 0.5f : (b.exact ? b.fz : 0.0f);
+                    Group& m = groups[corner_group[c0 + static_cast<u32>(v)]];
+                    m.dx += (ax[v] - vpos_x(b)) * 0.5f;
+                    m.dy += (ay[v] - vpos_y(b)) * 0.5f;
+                    ++m.n;
+                    if (a.v[v].exact && b.exact) b.fz = (a.v[v].fz + b.fz) * 0.5f;
+                }
+            }
+        }
+        // Place every polygon corner: the shared move of its group; corners nobody moved follow
+        // the other corners of their polygon; a polygon with no moved corner stays where it is
+        corner_pos = 0;
+        for (std::size_t o = 0; o < mid.size(); ++o) {
+            HrOp& op = mid[o];
+            for (std::size_t i = 0; i < op.prims.size() && !op.fill; ++i) {
+                HrPrim& q = op.prims[i];
+                if (q.is_rect) continue;
+                float dx[3], dy[3], sx = 0.0f, sy = 0.0f;
+                bool has[3];
+                u32 found = 0;
+                for (int v = 0; v < 3; ++v) {
+                    const Group& g = groups[corner_group[corner_pos + static_cast<u32>(v)]];
+                    has[v] = g.n != 0;
+                    if (has[v]) {
+                        dx[v] = g.dx / static_cast<float>(g.n);
+                        dy[v] = g.dy / static_cast<float>(g.n);
+                        sx += dx[v];
+                        sy += dy[v];
+                        ++found;
+                    }
+                }
+                corner_pos += 3u;
+                if (found == 0) continue;
+                for (int v = 0; v < 3; ++v) {
+                    if (!has[v]) { dx[v] = sx / static_cast<float>(found); dy[v] = sy / static_cast<float>(found); }
+                    GpuVertex& b = q.v[v];
+                    const float mx = vpos_x(b) + dx[v], my = vpos_y(b) + dy[v];
+                    if (!b.exact) b.fz = 0.0f;
                     b.exact = true;
                     b.fx = mx;
                     b.fy = my;

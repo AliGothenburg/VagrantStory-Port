@@ -55,7 +55,8 @@ tıklamak yeterlidir (konsol penceresi açılmaz):
   - **3D sahneyi orana göre genişlet:** açıksa geniş oranlarda 3D sahne esnetilmez, yanlara
     doğru daha fazlası görünür (denenen sahnelerde kenarlarda boşluk görülmedi). 2D yazılar ve
     göstergeler (HP/MP, menüler, hasar sayıları, efektler) iç çözünürlük 2× ve üstündeyken
-    esnetilmez: her parça grubu kendi yerinde kalıp asıl oranına daraltılır. 1×'te ve
+    esnetilmez: 2D katman bir bütün olarak ekranın ortasında asıl 4:3 düzeniyle durur (HP/MP
+    gibi göstergeler bu yüzden ekran kenarına değil 4:3 alanın kenarına yakın görünür). 1×'te ve
     "Köşe hassasiyeti" kapalıyken 2D öğeler yine esner. Kapalıysa görüntü seçilen orana esnetilir.
   - Pencere kipinde pencere seçilen oranı korur (kenarından sürükleyince ve F3 ile oran
     değiştirince), bu yüzden etrafta siyah bant kalmaz. Tam ekranda ekranınızın oranını seçin

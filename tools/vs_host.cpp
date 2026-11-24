@@ -1,4 +1,4 @@
-#include "vsport/cdrom_iso.hpp"
+﻿#include "vsport/cdrom_iso.hpp"
 #include "vsport/cheats.hpp"
 #include "vsport/free_camera.hpp"
 #include "vsport/pad_mapping.hpp"
@@ -340,8 +340,8 @@ LRESULT CALLBACK HostWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) 
                     st->toggle_fullscreen(hwnd); // Leave fullscreen first so the dialog is visible
                 }
                 const int answer = MessageBoxW(hwnd,
-                    L"Oyundan çıkmak istiyor musunuz?\n\n"
-                    L"Oyunda kaydetmediğiniz ilerleme kaybolur.",
+                    L"Oyundan Ã§Ä±kmak istiyor musunuz?\n\n"
+                    L"Oyunda kaydetmediÄŸiniz ilerleme kaybolur.",
                     L"Vagrant Story", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2);
                 if (answer == IDYES) {
                     host_log("Esc: cikis onaylandi");
@@ -358,6 +358,7 @@ LRESULT CALLBACK HostWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) 
                     st->widescreen = !st->widescreen;            // Shift+F3: widen 3D on/off
                 } else {
                     st->aspect = (st->aspect + 1) % launcher::ASPECT_COUNT; // F3: next aspect ratio
+                    st->widescreen = st->aspect != 0; // A wider ratio widens the view (not a stretched 4:3)
                 }
                 st->fit_window_to_aspect(hwnd);
                 st->apply_gte_widening(hwnd);
@@ -1275,8 +1276,8 @@ int main(int argc, char** argv) {
         float raw_x = 0.0f, raw_y = 0.0f;
         if (!hidden_window) {
             gamepad.right_stick(raw_x, raw_y);
-            cam_x = FreeCamera::shape(raw_x, 0.25f);
-            cam_y = FreeCamera::shape(raw_y, 0.25f);
+            cam_x = FreeCamera::shape(raw_x, 0.2f);
+            cam_y = FreeCamera::shape(raw_y, 0.2f);
         }
         for (const auto& pr : presses) {                    // Scripted --press, as in headless mode
             if (rt.vblank_count() >= pr.at_vblank && rt.vblank_count() < pr.at_vblank + pr.frames) {
@@ -1314,6 +1315,10 @@ int main(int argc, char** argv) {
                 ++cam_log_lines;
                 host_log("Sag cubuk: ham x=%.2f y=%.2f, kullanilan x=%.2f y=%.2f -> %s", raw_x, raw_y, cam_x, cam_y,
                          free_cam_on ? FreeCamera::status_text(st) : "serbest kamera ayarlardan kapali");
+                if (st == FreeCamera::Status::NotField) {
+                    host_log("  kamera 0x%08X: etkin=%u isaretci=0x%08X uzaklik=%d", free_cam.camera(), free_cam.last_active(),
+                             free_cam.last_ptr(), free_cam.last_dist());
+                }
             }
             cam_log_pushed = pushed;
             cam_log_status = st;
@@ -1370,6 +1375,28 @@ int main(int argc, char** argv) {
             }
         }
         if (!no_throttle) throttle_frame();
+        {
+            // Game log: real speed every 10 s (emulated vblanks per real second against the target),
+            // so "the game runs too fast" can be told apart from a smoother picture
+            static LARGE_INTEGER spd_t0{};
+            static u32 spd_vb0 = 0, spd_calls = 0, spd_lines = 0;
+            LARGE_INTEGER now{};
+            QueryPerformanceCounter(&now);
+            ++spd_calls;
+            if (spd_t0.QuadPart == 0) { spd_t0 = now; spd_vb0 = rt.vblank_count(); spd_calls = 0; }
+            const double sec = static_cast<double>(now.QuadPart - spd_t0.QuadPart) / static_cast<double>(qpc_freq.QuadPart);
+            if (sec >= 10.0) {
+                if (spd_lines < 60 && !hidden_window) {
+                    ++spd_lines;
+                    host_log("Hiz: %.1f kare/s (hedef %d), %.1f gosterim/s, Tab %s, ara kare %llu", (rt.vblank_count() - spd_vb0) / sec,
+                             rt.video_60hz() ? 60 : 50, spd_calls / sec, (GetAsyncKeyState(VK_TAB) & 0x8000) != 0 ? "basili" : "serbest",
+                             static_cast<unsigned long long>(rt.gpu().interp_shown()));
+                }
+                spd_t0 = now;
+                spd_vb0 = rt.vblank_count();
+                spd_calls = 0;
+            }
+        }
     };
 
     if (host_state.self_demo) {

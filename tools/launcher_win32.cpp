@@ -1,4 +1,4 @@
-#include "launcher_win32.hpp"
+﻿#include "launcher_win32.hpp"
 #include "achievements.hpp"
 
 #include "vsport/cdrom_iso.hpp"
@@ -556,8 +556,8 @@ void build_controls(LauncherState& st) {
     add_check(st, L"Tam sayı ölçekleme (yalnızca 1× iç çözünürlükte; kenarlarda boşluk bırakır)", LX, y, IW, 20,
               ID_INTEGER_CHECK, s.integer_scale);
     y += 28;
-    add_check(st, L"3D sahneyi orana göre genişlet (kapalıysa görüntü esnetilir;\n"
-                  L"2D yazılar ve göstergeler yatayda esner)",
+    add_check(st, L"3D sahneyi orana göre genişlet (kapalıysa 4:3 görüntü yatayda esnetilir;\n"
+                  L"açıkken yazılar ve göstergeler esnemez)",
               LX, y, IW, 36, ID_WIDE_CHECK, s.widescreen, BS_MULTILINE);
     y += 46;
     add_check(st, L"Avrupa (PAL) diskini 60 Hz'de çalıştır: oyun ABD sürümü hızında akar\n"
@@ -840,7 +840,13 @@ LRESULT CALLBACK LauncherWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
                     return 0;
                 }
                 case ID_ASPECT_COMBO:
-                    if (HIWORD(wparam) == CBN_SELCHANGE) fill_window_sizes(*st, selected_window_height(*st));
+                    if (HIWORD(wparam) == CBN_SELCHANGE) {
+                        fill_window_sizes(*st, selected_window_height(*st));
+                        // A wider ratio is meant as a wider view, not a stretched 4:3 picture: widen the
+                        // 3D scene with it (still switchable off below); back to 4:3 turns it off
+                        const auto a = SendMessageW(item(*st, ID_ASPECT_COMBO), CB_GETCURSEL, 0, 0);
+                        if (a >= 0) SendMessageW(item(*st, ID_WIDE_CHECK), BM_SETCHECK, a == 0 ? BST_UNCHECKED : BST_CHECKED, 0);
+                    }
                     return 0;
                 case ID_RA_LOGIN: {
                     const std::string user = window_text_utf8(item(*st, ID_RA_USER));

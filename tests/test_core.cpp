@@ -1,4 +1,4 @@
-#include "vsport/cdrom_iso.hpp"
+﻿#include "vsport/cdrom_iso.hpp"
 #include "vsport/cfg_lifter.hpp"
 #include "vsport/cheats.hpp"
 #include "vsport/free_camera.hpp"
@@ -770,10 +770,11 @@ void test_cheat_codes() {
 // Right-stick camera: writes only with the expected program code and an active field camera
 void test_free_camera() {
     CHECK(FreeCamera::shape(0.2f, 0.25f) == 0.0f && FreeCamera::shape(1.0f, 0.25f) == 1.0f &&
-              FreeCamera::shape(-1.0f, 0.25f) == -1.0f, "Stick dead zone and full tilt");
+              FreeCamera::shape(-1.0f, 0.25f) == -1.0f && FreeCamera::shape(0.6f, 0.2f) > 0.4999f && FreeCamera::shape(0.6f, 0.2f) < 0.5001f,
+          "Stick dead zone, full tilt, linear half push");
 
     PsxRuntime rt;
-    const u32 C = FreeCamera::CAMERA;
+    const u32 C = 0x800F19D0u;
     rt.write32(C + 0x00u, 0x800u); rt.write32(C + 0x14u, 0x800u);
     rt.write32(C + 0x04u, static_cast<u32>(-384)); rt.write32(C + 0x08u, 0x600u);
     rt.write32(C + 0x1Cu, 1u); rt.write32(C + 0x2Cu, 0x8011F9F0u);
@@ -793,6 +794,17 @@ void test_free_camera() {
     rt.write32(C + 0x1Cu, 0u); // Title screen, menus: field camera off
     const u32 yaw = rt.read32(C);
     CHECK(!cam.apply(rt, 1.0f, 0.0f, 50u) && rt.read32(C) == yaw, "Inactive camera is not touched");
+
+    // Another copy of the game: code 8 bytes earlier, struct at 0x800F19C8 (read from the code)
+    PsxRuntime rt2;
+    const u32 C2 = 0x800F19C8u;
+    rt2.write32(C2 + 0x00u, 0x800u); rt2.write32(C2 + 0x14u, 0x800u);
+    rt2.write32(C2 + 0x04u, static_cast<u32>(-384)); rt2.write32(C2 + 0x08u, 0x600u);
+    rt2.write32(C2 + 0x1Cu, 1u); rt2.write32(C2 + 0x2Cu, 0x8011F9F0u);
+    rt2.write32(0x8006DDD4u, 0x3C02800Fu); rt2.write32(0x8006DDD8u, 0x244319C8u);
+    FreeCamera cam2;
+    CHECK(cam2.apply(rt2, 1.0f, 0.0f, 50u) && cam2.camera() == C2 && rt2.read32(C2) == 0x800u + 41u,
+          "Struct address taken from the engine code");
 }
 
 // GP1(03h) display off: the picture must be black (the game hides VRAM set-up before movies)

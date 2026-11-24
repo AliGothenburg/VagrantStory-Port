@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include "vsport/hr_backend.hpp"
 #include "vsport/pgxp.hpp"
@@ -85,11 +85,10 @@ public:
     void set_pgxp(const PgxpCache* cache) noexcept { pgxp_ = cache; }
     // Widescreen: the 3D view is widened by the GTE (x * k) and the picture stretched to the wider
     // screen. 2D primitives (no vertex from the GTE: HUD, menus, text) are narrowed by k in the
-    // upscaled picture so that they keep their shape; each group of neighbouring 2D primitives is
-    // narrowed around its own centre, so it stays where it was. k = 1: off. Needs set_pgxp.
+    // upscaled picture so that they keep their shape, all around the centre of the drawing area (the
+    // 2D layer keeps its 4:3 layout in the middle). k = 1: off. Needs set_pgxp.
     void set_hud_squash(float k) noexcept { hud_squash_ = k; }
     [[nodiscard]] float hud_squash() const noexcept { return hud_squash_; }
-    struct FlatBox { float x1, y1, x2, y2; }; // Native bounding box of a 2D primitive / group
     // Perspective-correct texture mapping in the upscaled picture (needs exact vertices with depth)
     void set_perspective_textures(bool on) noexcept { persp_tex_ = on; }
     [[nodiscard]] RimLight rim_light() const noexcept { return rim_mode_; }
@@ -187,10 +186,6 @@ private:
     float hud_squash_ = 1.0f;
     [[nodiscard]] bool hud_squash_on() const noexcept { return hud_squash_ < 0.999f && pgxp_ && pgxp_->enabled() && hr_scale_ > 1u; }
     void squash_flat_prims(); // Applies hud_squash_ to the queued batch (flush_hr)
-    void hud_frame_end();     // Picture swap: this frame's 2D groups become the next frame's anchors
-    std::vector<FlatBox> frame_flat_, prev_groups_;
-    struct FlatGroup { FlatBox box; float anchor; bool squash; };
-    std::vector<FlatGroup> cur_groups_; // 2D groups drawn so far in this frame, with their centres
     std::unordered_map<u64, std::size_t> rim_pending_; // Queued rim copies waiting for their normal polygon
     float rim_dx_ = 1.0f, rim_dy_ = -1.0f;             // Shift of the last matched rim pair (native px)
     std::vector<HrPrim> hr_batch_;
