@@ -1,230 +1,258 @@
 # Vagrant Story - Native Port & Static Recompilation Engine (`vsport`)
 
-Sıfırdan C++20 ile geliştirilen modüler **Vagrant Story (PS1 -> Windows x64)** yerel port ve statik rekompilasyon altyapısı.
+**English** | [Türkçe](README.tr.md)
 
-## Mimari Bileşenler
+A modular native port and static recompilation framework for **Vagrant Story (PS1 -> Windows x64)**,
+written from scratch in C++20. It also runs on Linux, Steam Deck and Android through SDL3.
 
-| Modül | Dosyalar | Görev |
+The game, the settings window and the release notes are available in **English and Turkish**.
+The language follows your system by default; change it with **Language / Dil** at the top right of
+the settings window (`language=0` automatic, `1` English, `2` Turkish in `VagrantStory.ini`).
+Contributions are welcome in either language.
+
+You need your own copy of the game disc. No game data is included in this repository.
+
+## Architecture
+
+| Module | Files | Role |
 |---|---|---|
-| **CD-ROM XA / ISO9660** | `include/vsport/cdrom_iso.hpp`, `src/cdrom_iso.cpp` | `.cue` / `.bin` (2352 bayt Mode 2 XA) ve `.iso` (2048 bayt) okuyucu, `SYSTEM.CNF` ayrıştırıcı ve doğrudan LBA sektör erişimi |
-| **PS1 CD-ROM XA Kontrolcüsü** | `include/vsport/psx_cdrom.hpp`, `src/psx_cdrom.cpp` | `0x1F801800..0x1F801803` indeksli donanım yazmaçları, `CdlSetloc`/`CdlReadN`/`CdlPause`, `INT1..INT3` IRQ2 durum makinesi ve DMA3 akışı |
-| **PS-X EXE & `.PRG` Analizörü** | `include/vsport/psx_exe.hpp`, `src/psx_exe.cpp` | `SLES_027.54` / `SLUS_010.40` çekirdek yükleyici ve diskteki tüm `.PRG` overlay modülleri (`BATTLE`, `INITBTL`, `TITLE`, `ENDING`, `SCREFF2`, `MAINMENU`, `MENU0..MENUF`) için otomatik `JAL->Prologue` KSEG0 taban adresi çözücüsü |
-| **MIPS R3000A + COP2 Çözücü** | `include/vsport/mips_decoder.hpp`, `src/mips_decoder.cpp` | Tam MIPS I + COP0 + GTE (`COP2`) talimat çözücü ve disassembler |
-| **CFG & C++20 Statik Rekompilatör** | `include/vsport/cfg_lifter.hpp`, `src/cfg_lifter.cpp` | `.data` filtrelemeli fonksiyon keşfi, gecikme yuvası (branch delay slot) korumalı C++20 kod üretimi ve **21 modül / 3.138 yerel x64 fonksiyon** için 64-bit FNV-1a overlay imza kaydı |
-| **GTE (Geometry Transform Engine)** | `include/vsport/gte.hpp`, `src/gte.cpp` | Sabit noktalı 3B perspektif dönüşüm (`RTPS`/`RTPT`), yüzey kırpma (`NCLIP`), derinlik sıralama (`AVSZ3`/`AVSZ4`), ışıklandırma ve **16:9 geniş ekran projeksiyon ölçekleme** |
-| **PS1 MDEC Video Çözücü** | `include/vsport/psx_mdec.hpp`, `src/psx_mdec.cpp` | `0x1F801820` / `0x1F801824` donanım MDEC, RLE ters niceleme (IQ), 2B ayrılabilir IDCT, BT.601 YCrCb→RGB dönüşümü ve `DMA0`/`DMA1` şeritli **24-bit `RGB888` `.STR` tam hareketli video (FMV)** çözücüsü |
-| **PS1 GPU & Yazılım Rasterizer** | `include/vsport/psx_gpu.hpp`, `src/psx_gpu.cpp` | 1024×512 RGB555 VRAM, `GP0`/`GP1` (`Y1..Y2` dikey aralık + 24-bit `RGB888` ekran kipi) paket işlemcisi, `ABR 0..3` yarı-saydamlık, CLUT dokulu üçgen/dörtgen/sprite çizici, DMA6 OTC ve DMA2 bağlı liste (Ordering Table) hattı |
-| **Direct3D 11 Donanım Çizici** | `include/vsport/d3d11_renderer.hpp`, `src/d3d11_renderer.cpp` | `R16_UINT` doğrudan GPU VRAM aktarımı, HLSL RGB555/RGB888 çözücü ve 3 ölçekleme kipi (*Keskin Piksel*, *Bilinear*, *Trinitron CRT*) |
-| **PS1 SPU ADPCM & WASAPI Ses** | `include/vsport/psx_spu.hpp`, `src/psx_spu.cpp`, `src/win32_audio.cpp` | 512 KB SPU Ses RAM'i, `DMA4` dalga bankası aktarımı, 24 donanım sesi, Sony 4-bit ADPCM IIR + ADSR zarf sentezleyici ve 44.1 kHz Stereo WASAPI (yaklaşık 40–50 ms kuyruk, gerekirse WinMM `waveOut`) / `.wav` çıkışı |
-| **Hibrit AOT Host Runtime** | `include/vsport/runtime.hpp`, `src/runtime.cpp` | 2 MB / 8 MB RAM, 1 KB Scratchpad, BIOS `A0`/`B0`/`C0` + Root Counter HLE, tam-çift yönlü `SIO0` kontrolcü ve sayfa-epoch önbellekli **Overlay-Duyarlı Native x64 AOT + Yorumlayıcı hibrit dağıtıcı** |
+| **CD-ROM XA / ISO9660** | `include/vsport/cdrom_iso.hpp`, `src/cdrom_iso.cpp` | `.cue` / `.bin` (2352-byte Mode 2 XA) and `.iso` (2048-byte) reader, `SYSTEM.CNF` parser and direct LBA sector access |
+| **PS1 CD-ROM XA controller** | `include/vsport/psx_cdrom.hpp`, `src/psx_cdrom.cpp` | Indexed hardware registers `0x1F801800..0x1F801803`, `CdlSetloc`/`CdlReadN`/`CdlPause`, the `INT1..INT3` IRQ2 state machine and DMA3 streaming |
+| **PS-X EXE & `.PRG` analyser** | `include/vsport/psx_exe.hpp`, `src/psx_exe.cpp` | `SLES_027.54` / `SLUS_010.40` core loader, plus an automatic `JAL->Prologue` KSEG0 base address resolver for every `.PRG` overlay on the disc (`BATTLE`, `INITBTL`, `TITLE`, `ENDING`, `SCREFF2`, `MAINMENU`, `MENU0..MENUF`) |
+| **MIPS R3000A + COP2 decoder** | `include/vsport/mips_decoder.hpp`, `src/mips_decoder.cpp` | Full MIPS I + COP0 + GTE (`COP2`) decoder and disassembler |
+| **CFG & C++20 static recompiler** | `include/vsport/cfg_lifter.hpp`, `src/cfg_lifter.cpp` | Function discovery with `.data` filtering, C++20 code generation that keeps branch delay slots correct, and a 64-bit FNV-1a overlay signature registry for **21 modules / 3,138 native x64 functions** |
+| **GTE (Geometry Transform Engine)** | `include/vsport/gte.hpp`, `src/gte.cpp` | Fixed-point 3D perspective transform (`RTPS`/`RTPT`), face culling (`NCLIP`), depth sorting (`AVSZ3`/`AVSZ4`), lighting and **16:9 widescreen projection scaling** |
+| **PS1 MDEC video decoder** | `include/vsport/psx_mdec.hpp`, `src/psx_mdec.cpp` | Hardware MDEC at `0x1F801820` / `0x1F801824`, RLE and inverse quantisation (IQ), separable 2D IDCT, BT.601 YCrCb→RGB and a striped `DMA0`/`DMA1` decoder for **24-bit `RGB888` `.STR` full-motion video (FMV)** |
+| **PS1 GPU & software rasteriser** | `include/vsport/psx_gpu.hpp`, `src/psx_gpu.cpp` | 1024×512 RGB555 VRAM, `GP0`/`GP1` packet processor (`Y1..Y2` vertical range + 24-bit `RGB888` display mode), `ABR 0..3` semi-transparency, CLUT-textured triangle/quad/sprite drawing, and the DMA6 OTC and DMA2 linked-list (ordering table) pipeline |
+| **Direct3D 11 hardware renderer** | `include/vsport/d3d11_renderer.hpp`, `src/d3d11_renderer.cpp` | Direct `R16_UINT` VRAM upload to the GPU, an HLSL RGB555/RGB888 decoder and 3 scaling modes (*Sharp pixels*, *Bilinear*, *Trinitron CRT*) |
+| **PS1 SPU ADPCM & WASAPI audio** | `include/vsport/psx_spu.hpp`, `src/psx_spu.cpp`, `src/win32_audio.cpp` | 512 KB SPU sound RAM, `DMA4` wave bank transfer, 24 hardware voices, Sony 4-bit ADPCM IIR + ADSR envelope synthesis and 44.1 kHz stereo WASAPI output (about 40–50 ms queue, WinMM `waveOut` as a fallback) or `.wav` output |
+| **Hybrid AOT host runtime** | `include/vsport/runtime.hpp`, `src/runtime.cpp` | 2 MB / 8 MB RAM, 1 KB scratchpad, BIOS `A0`/`B0`/`C0` + root counter HLE, full-duplex `SIO0` controller, and an **overlay-aware native x64 AOT + interpreter hybrid dispatcher** with page-epoch caching |
+| **Languages** | `include/vsport/i18n.hpp`, `src/i18n.cpp` | `txt(english, turkish)` picks the player-facing text in the chosen language; logs and developer output are English |
 
-## Oynamak
+## Playing
 
-`./build.ps1` derlemenin sonunda oyunu `dist/VagrantStory.exe` olarak kopyalar. Bu dosyaya çift
-tıklamak yeterlidir (konsol penceresi açılmaz):
+`./build.ps1` copies the game to `dist/VagrantStory.exe` at the end of the build. Double-click
+that file to play (no console window opens):
 
-- Açılışta **ayarlar penceresi** gelir. Soldaki düğmelerle sayfalar arasında geçilir (Oyun, Grafik,
-  Ekran, Ses, Kontroller):
-  - **Oyun:** oyun klasörünü seçin (içindeki `.cue`/`.bin`/`.iso` ve `.sbi` otomatik bulunur) ya da
-    dosyaları tek tek seçin. Pencere diski doğrular (sürüm, Avrupa sürümünde `.sbi` durumu).
-  - **Grafik:** iç çözünürlük (1× orijinal 320×240, 2×–6×; 1080p ekranlar için 5×), çizim,
-    ekran kartı, kenar ışığı, köşe hassasiyeti, 3D doku yumuşatma.
-  - **Ekran:** pencere / tam ekran, **görüntü oranı** (4:3, 10:7, 3:2, 16:10, 16:9 ya da
-    pencereyi doldur), pencere boyutu (480p, 720p, 960p, 1080p, 1200p, 1440p, 4K; genişlik orana
-    göre ayarlanır), filtre (keskin piksel, yumuşak, CRT tarama çizgileri), tam sayı ölçekleme.
-  - **Çizim:** yüksek çözünürlüklü görüntüyü kimin çizeceği. **Ekran kartı** (varsayılan,
-    Direct3D 11) çok daha hızlıdır; **İşlemci** eski yazılım çizicisidir. İkisinin çıktısı
-    neredeyse piksel piksel aynıdır. Ekran kartı başlatılamazsa oyun kendiliğinden işlemciye geçer.
-  - **Ekran kartı:** birden fazla ekran kartı olan bilgisayarlarda (ör. laptoplarda tümleşik +
-    NVIDIA) hangisinin kullanılacağı. **Otomatik** (varsayılan) en güçlüsünü seçer; seçilen kart
-    artık takılı değilse yine otomatik seçime dönülür.
-  - **Karakter kenar ışığı:** oyun ara sahnelerde ve menüde karakterleri önce parlak beyaz,
-    ışığa doğru ~1 piksel kaydırılmış olarak, sonra normal çizer (orijinal kenar ışığı efekti).
-    Yüksek iç çözünürlükte bu kayma sert, kalın bir bant olur. **Yumuşak** (varsayılan) ışığı
-    yarı saydam çizip dışa doğru söndürür; **Keskin** ince, parlak bir çizgiye indirir;
-    **Kapalı** çizmez.
-  - **Köşe hassasiyeti:** PS1'in geometri birimi (GTE) her noktayı tam piksele yuvarlar; bu
-    yüzden modeller ve kenarlar hareket ederken titrer. **Titreme düzeltmesi** (iç çözünürlük
-    2× ve üstü) GTE'nin hesapladığı tam konumu saklar ve yüksek çözünürlüklü çizimde kullanır.
-    **Titreme + perspektifli doku** (varsayılan) ayrıca köşelerin derinliğini kullanarak dokuları
-    perspektife uygun çizer: zemin ve duvarlardaki dokular artık köşegenler boyunca bükülüp
-    kaymaz (PS1 dokuyu ekranda doğrusal yayar). Derinliği bilinmeyen poligonlar PS1'deki gibi
-    çizilir. Oyun bu noktaları kendi koduyla kopyaladığı için eşleştirme piksel
-    değeriyle yapılır (köşelerin ~%90'ı); aynı piksele düşen birden fazla nokta varsa o köşe
-    orijinal konumunda kalır. Oyunun kendisi ve orijinal (1×) görüntü değişmez.
-  - **3D sahneyi orana göre genişlet:** açıksa geniş oranlarda 3D sahne esnetilmez, yanlara
-    doğru daha fazlası görünür (denenen sahnelerde kenarlarda boşluk görülmedi). 2D yazılar ve
-    göstergeler (HP/MP, menüler, hasar sayıları, efektler) iç çözünürlük 2× ve üstündeyken
-    esnetilmez: 2D katman bir bütün olarak ekranın ortasında asıl 4:3 düzeniyle durur (HP/MP
-    gibi göstergeler bu yüzden ekran kenarına değil 4:3 alanın kenarına yakın görünür). 1×'te ve
-    "Köşe hassasiyeti" kapalıyken 2D öğeler yine esner. Kapalıysa görüntü seçilen orana esnetilir.
-  - Pencere kipinde pencere seçilen oranı korur (kenarından sürükleyince ve F3 ile oran
-    değiştirince), bu yüzden etrafta siyah bant kalmaz. Tam ekranda ekranınızın oranını seçin
-    (ör. 16:9 monitörde 16:9) ya da "doldur"u kullanın. Tam sayı ölçekleme yalnızca 1× iç
-    çözünürlükte uygulanır.
-  - **Ses:** sesi kapatma, ses seviyesi, **yankı** (PS1'in reverb birimi; oyun mekân ve zindan
-    yankısı için yoğun kullanır, varsayılan açık) ve **kübik ara değerleme** (örnekler arasında
-    doğrusal yerine kübik geçiş; tizler biraz daha temiz, varsayılan kapalı, gerçek PS1 doğrusala
-    yakındır). Komut satırı: `--reverb 0/1`, `--cubic`.
-  - **Titreşim:** oyun DualShock titreşimini kullanır; Xbox / XInput uyumlu kontrolcülerde çalışır
-    (Kontroller sayfasından kapatılabilir; DirectInput kontrolcülerde henüz yok).
-  - **Anlık kayıt:** oyunun kayıt noktalarından bağımsız olarak **F5** kaydeder, **F7** yükler, **F6** kayıt
-    yuvasını değiştirir (1–5; dosyalar hafıza kartının yanında, `VagrantStory_durumN.vss`). Hafıza kartı
-    anlık kayda dahil değildir: bir durumu yüklemek kartta yapılmış kayıtları geri almaz.
-    Gelişmiş sayfasında iki seçenek daha var: **çıkarken durumu kaydedip açılışta kaldığın yerden devam**
-    ve **geri sarma** (F8 basılı tutulunca son ~30 saniye; ~110 MB bellek).
-  - **Hile kodları:** Gelişmiş sayfasından açılır. Kodlar exe'nin yanındaki `VagrantStory_hileler.txt`
-    dosyasına GameShark / Action Replay biçiminde yazılır (`[Hile adı]` satırı, altında `80012345 03E7`
-    gibi kodlar; `[Ad] off` kapalı hile). Desteklenen türler: 80, 30, D0–D3, E0–E3. Kodlar oyunun
-    sürümüne özeldir (Avrupa sürümü: SLES-02754). "Hile dosyasını aç…" dosyayı açıklamasıyla oluşturur.
-  - **Ara kare üretimi (Grafik sayfası, deneysel):** oyun 2 vblank'te bir yeni kare gösterir
-    (25 fps). Açıkken her yeni karenin öncesinde, her poligonu önceki ve yeni karedeki yerinin tam
-    ortasında çizen bir ara kare gösterilir; görüntü 50 fps akar. Oyunun kendisi değişmez (oyun
-    mantığı 25 fps çalışmaya devam eder). Bunun bedeli, yeni karenin 1 vblank (20 ms) geç
-    görünmesidir. Sahne değişimlerinde, oyunun yavaşladığı anlarda, videolarda ve iki kare
-    arasında bulunamayan ya da çok uzağa sıçrayan poligonlarda ara kare yapılmaz; o poligonlar
-    yeni karedeki yerinde çizilir. Yazılar ve göstergeler (sprite'lar) yerinde kalır. Yalnızca
-    ekran kartı çiziminde ve 2× ve üstü iç çözünürlükte çalışır. Komut satırı: `--interp 0/1`.
-  - **Doku paketleri:** exe'nin yanındaki `dokular` klasörüne konan PNG'ler oyunun dokularının yerine
-    çizilir (2× ve üstü iç çözünürlükte, iki çizim yolunda da; oyunun kendisi ve 1× görüntü değişmez).
-    Paket hazırlamak için Gelişmiş sayfasında "Oyunun dokularını dök" açılır: oyun bir dokuyu her
-    çizdiğinde, daha önce dökülmemişse `dokular\_dokum` klasörüne
-    `<yükleme özeti>-<palet özeti>-<renk derinliği>.png` adıyla yazılır. Görüntü, oyunun VRAM'e bir
-    seferde yüklediği alanın tamamıdır, o paletle çizilmiş haliyle; saydam pikseller alfa 0'dır.
-    Büyütülmüş ya da yeniden çizilmiş hali **aynı adla** `dokular` klasörüne (alt klasörler olur; `_`
-    ile başlayan klasörler okunmaz) konunca kullanılır. Boyut serbesttir (genelde 2×–8×). Çizilirken
-    bilinear süzülür; alfası %50'nin altındaki pikseller saydamdır. Yarı saydamlık oyunun kendi doku
-    pikselinden gelir. Ad, dosya adının başındaki bu üç parçadır; arkasına `-kılıç` gibi bir not
-    eklenebilir. Bilinen sınırlar: oyun dokunun paletini değiştirdiğinde (renk geçişleri) o anda
-    paketteki doku kullanılmaz. Doku penceresi (E2) kullanan çizimler ve birden fazla yüklemeye
-    yayılan dokular da değiştirilemez. Paket her açılışta yeniden okunur. Komut satırı:
-    `--texpack KLASÖR`, `--texdump KLASÖR`.
-  - **Gecikme azaltma (runahead, Gelişmiş sayfası):** her vblank'te gerçek kare çalıştırılır (tuşlar,
-    ses) ve durumu saklanır. Ardından 1–3 kare ileri çalıştırılıp sonuncusu gösterilir, sonra
-    saklanan duruma dönülür. Tuşa basışın sonucu seçilen kare sayısı kadar (20–60 ms) erken görünür.
-    Gösterilen kare, normal çalışmanın o kadar sonraki karesiyle piksel piksel aynıdır. Emülasyon
-    kare başına 2–4 kat çalışır. Ryzen 9 8945HS + RTX 4060' ta 4× oynanışta saniyede 1 karede 72,
-    2 karede 50 gerçek kare (gereken 50) ölçüldü: 1 kare önerilir, 2–3 kare ağır sahnelerde oyunu
-    yavaşlatabilir. Açıkken ara kare üretimi kapanır.
-    F5/F7, geri sarma ve çıkışta kayıt gerçek zaman çizgisinde çalışır. Komut satırı: `--runahead N`.
-  - **RetroAchievements (Başarımlar sayfası):** retroachievements.org hesabınızla giriş yapın; şifre
-    saklanmaz, sunucunun verdiği oturum anahtarı ini'ye yazılır. Vagrant Story'nin başarım seti
-    (200 başarım) yalnızca **ABD sürümünü (SLUS-01040)** tanır; Avrupa diskinde "başarım seti yok"
-    bildirilir. Yalnızca softcore: yeni bir emülatöre hardcore onayı verilmez; anlık kayıt, geri
-    sarma ve hileler kullanılabilir. Açılan başarımlar pencere başlığında ve `VagrantStory.log`'da
-    görünür. Gecikme azaltmada yalnızca gerçek kareler denetlenir. Resmî
-    [rcheevos](https://github.com/RetroAchievements/rcheevos) kütüphanesi (v12.5.0, MIT)
-    `third_party/rcheevos` altındadır. `--ra-hash DISK` bir diskin RA özetini yazar.
-  - **ABD sürümü:** SLUS-01040 diski de çalışır (60 Hz, `.sbi` gerekmez). Derlenmiş oyun kodu Avrupa
-    sürümünden üretildiği için ABD sürümü yorumlayıcıyla çalışır: 4× ekran kartı çiziminde
-    saniyede 84–103 kare (gereken 60). Gecikme azaltma bu sürümde gerçek zamana yetişmez.
-  - **PAL 60 Hz (Ekran sayfası):** Avrupa sürümü 50 Hz'de saniyede 25 kare çalışır ve bu yüzden ABD
-    sürümünden (60 Hz, saniyede 30 kare) ~%17 yavaştır; bu orijinal davranıştır. Açıkken PAL disk 60 Hz
-    hızında çalıştırılır ve oyun ABD sürümü hızında akar. Müzik ve yazı hızı zamanlayıcıyla çalıştığı
-    için değişmez (ölçüldü). Komut satırı: `--pal60 0/1`.
-  - **Bildirimler:** anlık kayıt, geri sarma ve başarım bildirimleri pencere başlığının yanı sıra
-    görüntünün alt ortasında yarı saydam bir kutuda gösterilir; tam ekranda da görünür.
-  - **Videoları geçme:** oyun açılış videosunu START ile kendisi geçirir; diğer sahnelerde **Tab** hızlı ileri sarar.
-  - **Kenar yumuşatma (süper örnekleme):** iç çözünürlük pencereden büyükse görüntü, her ekran pikseli
-    kapladığı piksellerin ortalaması alınarak küçültülür; poligon kenarlarındaki tırtıklar yumuşar.
-    Bunun için iç çözünürlük 7× ve 8× seçenekleri eklendi (1080p ekranda önerilir; yalnızca ekran
-    kartı çiziminde, işlemcide 6× ile sınırlanır).
-  - **3D doku filtresi:** Kapalı, Yumuşak (bilinear) ya da **Keskin yumuşatma** (doku pikselleri keskin
-    kalır, yalnızca aralarındaki sınır yumuşatılır).
-  - **Gelişmiş › İşlemci hızı:** emüle edilen PS1 işlemcisini %150–%300 hızlandırır; oyunun
-    kalabalık sahnelerdeki kendi yavaşlamaları azalır (oyun hızlanmaz). Yüklemeler de kısalır.
-  - **Kontroller:** her PS1 tuşunun (×, ○, □, △, L1/R1, L2/R2, START, SELECT, L3/R3)
-    kontrolcüde hangi tuşa basılınca çalışacağını seçin; "Varsayılana döndür" konuma göre
-    eşlemeye geri döner. Yön tuşları ve sol çubuk sabittir; klavye tuşları değişmez.
-- Ayarlar exe'nin yanındaki `VagrantStory.ini` dosyasına kaydedilir. "Bu pencereyi her açılışta
-  göster" kapatılırsa oyun doğrudan açılır; ayarlara dönmek için oyunu **Shift** tuşuna basılı
-  tutarak başlatın.
-- Oyunun açılış ve kapanış adımları exe'nin yanındaki `VagrantStory.log` dosyasına yazılır (bir
-  sorun olursa nerede durduğunu gösterir). Kapanış 8 saniyede bitmezse oyun kendini sonlandırır;
-  arka planda penceresiz bir süreç kalmaz.
-- Oyun içinde **F11** / **Alt+Enter** tam ekran, **F4** filtre, **F3** görüntü oranı (sırayla),
-  **Shift+F3** 3D genişletme, **M** ses; bu değişiklikler de kaydedilir. **Esc** çıkış (onay sorulur).
-- **İç çözünürlük** 3D sahneyi 2×–4× çözünürlükte çizer: polygon kenarları ve doku eşlemesi
-  keskinleşir. Oyunun kendi VRAM'i orijinal çözünürlükte kalır (emülasyon doğruluğu korunur),
-  yüksek çözünürlüklü kopya yalnızca ekranda gösterilir. Bu kopya 24 bit renkle (true color)
-  çizilir: karanlık sahnelerde PS1'in 15 bit renklerinin oluşturduğu sert renk bantları
-  görünmez. **3D doku yumuşatma** düşük
-  çözünürlüklü dokulardaki blokları giderir (2D yazıları da biraz yumuşatır).
-- **Hız:** Yüksek çözünürlüklü görüntüyü varsayılan olarak ekran kartı çizer (Direct3D 11;
-  PS1 dokuları, yarı saydamlık, maske biti ve perspektif shader'da PS1 ile aynı tam sayı
-  hesabıyla yapılır). İki ekran kartlı laptoplarda güçlü olan (ör. NVIDIA) kendiliğinden seçilir.
-  Bu bilgisayarda (RTX 4060 Laptop) açılış sinematiğinin en ağır yerinde 5× ≈ gerçek zamanın
-  2,8 katı, 6× ≈ 2,6 katı; işlemcinin tümleşik grafiğiyle (Radeon 780M) 5× ≈ 1,5 katı. **İşlemci** seçilirse çizim
-  işlemcinin tüm çekirdeklerine şeritler halinde dağıtılır; o zaman ağır sahnelerde 4× ≈ 1,06
-  katı, 5× ≈ 0,8 katı (yavaşlama) olur. `vs_host --perf` her 250 karede hızı yazar
-  (`--gpu-hr` / `--cpu-hr` çiziciyi seçer; başsız çalıştırmada varsayılan işlemcidir).
-- En net görüntü için iç çözünürlükle birlikte **Keskin piksel** filtresini kullanın; Yumuşak ve
-  CRT filtreleri görüntüyü bilerek bulanıklaştırır.
-- **Hafıza kartı:** Oyunda kayıt yapılabilir. Kart 1, exe'nin yanındaki
-  `saves\VagrantStory_kart1.mcr` dosyasıdır (ayarlar penceresinden değiştirilebilir). Bu, diğer
-  emülatörlerin (DuckStation, ePSXe, Mednafen…) okuduğu standart 128 KB `.mcr` biçimidir; dosya
-  yoksa boş, formatlanmış bir kart oluşturulur. Değişiklikler oyun yazmayı bitirdikten yaklaşık
-  yarım saniye sonra ve çıkışta diske kaydedilir.
+- The **settings window** opens first. Switch pages with the buttons on the left (Game, Graphics,
+  Display, Audio, Controls, Advanced, Achievements):
+  - **Game:** choose the game folder (the `.cue`/`.bin`/`.iso` and `.sbi` inside it are found
+    automatically), or choose the files one by one. The window checks the disc (its release, and
+    the `.sbi` state for the European release).
+  - **Graphics:** internal resolution (1× original 320×240, 2×–8×; 5× for 1080p screens),
+    renderer, graphics card, rim light, vertex precision, 3D texture filter.
+  - **Display:** window / fullscreen, **aspect ratio** (4:3, 10:7, 3:2, 16:10, 16:9 or fill the
+    window), window size (480p, 720p, 960p, 1080p, 1200p, 1440p, 4K; the width follows the
+    ratio), filter (sharp pixels, smooth, CRT scanlines), integer scaling.
+  - **Renderer:** who draws the high-resolution picture. **Graphics card** (default, Direct3D 11)
+    is much faster; **Processor** is the older software renderer. Their output is almost pixel for
+    pixel the same. If the graphics card cannot be started, the game switches to the processor by
+    itself.
+  - **Graphics card:** on computers with more than one graphics card (for example a laptop with
+    integrated + NVIDIA graphics), which one to use. **Automatic** (default) picks the most
+    powerful one; if the chosen card is no longer present, automatic choice is used again.
+  - **Character rim light:** in cutscenes and menus the game first draws characters bright white,
+    shifted ~1 pixel towards the light, and then draws them normally (the original rim light
+    effect). At high internal resolution this shift becomes a hard, thick band. **Soft** (default)
+    draws the light semi-transparent and fades it outwards; **Sharp** turns it into a thin bright
+    line; **Off** does not draw it.
+  - **Vertex precision:** the PS1 geometry unit (GTE) rounds every point to a whole pixel, so
+    models and edges wobble as they move. **Wobble fix** (internal resolution 2× and up) keeps the
+    exact position the GTE computed and uses it in the high-resolution picture.
+    **Wobble fix + perspective textures** (default) also uses the depth of the corners to draw
+    textures in correct perspective: textures on floors and walls no longer bend and slide along
+    the diagonals (the PS1 spreads textures linearly on screen). Polygons whose depth is unknown are
+    drawn as on the PS1. Because the game copies these points with its own code, they are matched
+    by pixel value (about 90% of corners); when several points fall on the same pixel, that corner
+    stays at its original position. The game itself and the original (1×) picture do not change.
+  - **Widen the 3D scene to the ratio:** when on, the 3D scene is not stretched at wide ratios and
+    more of it shows at the sides (no gaps at the edges were seen in the scenes tried). 2D text and
+    gauges (HP/MP, menus, damage numbers, effects) are not stretched at internal resolution 2× and
+    up: the 2D layer stays in the middle of the screen as one piece with its original 4:3 layout
+    (so gauges such as HP/MP sit near the edge of the 4:3 area, not the edge of the screen). At 1×
+    and with "Vertex precision" off, 2D elements are still stretched. When off, the picture is
+    stretched to the chosen ratio.
+  - In window mode the window keeps the chosen ratio (when you drag its edge and when you change
+    the ratio with F3), so no black bars are left around it. In fullscreen choose your screen's
+    ratio (for example 16:9 on a 16:9 monitor) or use "fill". Integer scaling only applies at 1×
+    internal resolution.
+  - **Audio:** mute, volume, **reverb** (the PS1 reverb unit; the game uses it heavily for rooms and
+    dungeons, on by default) and **cubic interpolation** (a cubic instead of linear blend between
+    samples; slightly cleaner highs, off by default; the real PS1 is close to linear). Command
+    line: `--reverb 0/1`, `--cubic`.
+  - **Vibration:** the game uses DualShock vibration; it works with Xbox / XInput compatible
+    controllers (it can be turned off on the Controls page; not yet available for DirectInput
+    controllers).
+  - **Save states:** separate from the game's own save points, **F5** saves, **F7** loads and **F6**
+    changes the slot (1–5; the files sit next to the memory card as `VagrantStory_durumN.vss`). The
+    memory card is not part of a save state: loading a state does not undo saves made on the card.
+    The Advanced page has two more options: **save the state on exit and continue where you left
+    off**, and **rewind** (hold F8 for the last ~30 seconds; ~110 MB of memory).
+  - **Cheat codes:** turned on from the Advanced page. Codes go in `VagrantStory_hileler.txt` next
+    to the exe in GameShark / Action Replay format (a `[Cheat name]` line followed by codes such as
+    `80012345 03E7`; `[Name] off` is a disabled cheat). Supported types: 80, 30, D0–D3, E0–E3. Codes
+    are specific to the game's release (European release: SLES-02754). "Open cheat file…" creates
+    the file with an explanation.
+  - **Frame interpolation (Graphics page, experimental):** the game shows a new frame every 2
+    vblanks (25 fps). When on, before each new frame an in-between frame is shown that draws every
+    polygon exactly halfway between its place in the previous and the new frame, so the picture
+    runs at 50 fps. The game itself does not change (its logic keeps running at 25 fps). The cost
+    is that the new frame appears 1 vblank (20 ms) later. No in-between frame is made at scene
+    changes, when the game slows down, in videos, or for polygons that cannot be found in both
+    frames or jump too far; those polygons are drawn at their new place. Text and gauges (sprites)
+    stay in place. Only works with the graphics card renderer at 2× internal resolution and up.
+    Command line: `--interp 0/1`.
+  - **Texture packs:** PNGs placed in the `dokular` folder next to the exe are drawn in place of the
+    game's textures (at 2× internal resolution and up, with both renderers; the game itself and the
+    1× picture do not change). To make a pack, turn on "Dump the game's textures" on the Advanced
+    page: whenever the game draws a texture that has not been dumped yet, it is written to the
+    `dokular\_dokum` folder as `<upload hash>-<palette hash>-<colour depth>.png`. The picture is the
+    whole area the game uploaded to VRAM at once, drawn with that palette; transparent pixels have
+    alpha 0. An upscaled or redrawn version is used once it is placed in the `dokular` folder under
+    **the same name** (sub-folders are fine; folders starting with `_` are not read). Any size works
+    (usually 2×–8×). It is filtered bilinearly when drawn; pixels with alpha below 50% are
+    transparent. Semi-transparency comes from the game's own texture pixel. The name is the first
+    three parts of the file name; a note such as `-sword` may follow. Known limits: while the game
+    changes a texture's palette (colour fades) the pack texture is not used. Draws that use a
+    texture window (E2) and textures spread over several uploads cannot be replaced either. The
+    pack is read again at every start. Command line: `--texpack FOLDER`, `--texdump FOLDER`.
+  - **Run-ahead (Advanced page):** on every vblank the real frame is run (buttons, audio) and its
+    state is kept. Then 1–3 frames are run ahead and the last one is shown, after which the kept
+    state is restored. The result of a button press shows up that many frames (20–60 ms) sooner.
+    The frame shown is pixel for pixel the same as the matching later frame of a normal run.
+    Emulation does 2–4 times the work per frame. On a Ryzen 9 8945HS + RTX 4060 at 4×, 72 real
+    frames per second were measured with 1 frame and 50 with 2 frames (50 needed): 1 frame is
+    recommended, 2–3 frames can slow the game in heavy scenes. Frame interpolation turns off while
+    it is on. F5/F7, rewind and the exit save work on the real timeline. Command line:
+    `--runahead N`.
+  - **RetroAchievements (Achievements page):** sign in with your retroachievements.org account; the
+    password is not stored, only the session token the server returns is written to the ini.
+    Vagrant Story's achievement set (200 achievements) only recognises the **US release
+    (SLUS-01040)**; on the European disc you are told there is no achievement set. Softcore only: a
+    new emulator is not approved for hardcore; save states, rewind and cheats can be used. Unlocked
+    achievements are shown in the window title and in `VagrantStory.log`. With run-ahead only the
+    real frames are checked. The official
+    [rcheevos](https://github.com/RetroAchievements/rcheevos) library (v12.5.0, MIT) is in
+    `third_party/rcheevos`. `--ra-hash DISC` prints a disc's RA hash.
+  - **US release:** the SLUS-01040 disc works too (60 Hz, no `.sbi` needed). The compiled game code
+    is generated from the European release, so the US release runs on the interpreter: 84–103
+    frames per second with the graphics card renderer at 4× (60 needed). Run-ahead cannot keep up
+    with real time on this release.
+  - **PAL 60 Hz (Display page):** the European release runs at 25 frames per second at 50 Hz and is
+    therefore ~17% slower than the US release (60 Hz, 30 frames per second); that is the original
+    behaviour. When on, the PAL disc runs at 60 Hz speed and the game moves at US release speed.
+    Music and text speed are driven by a timer, so they do not change (measured). Command line:
+    `--pal60 0/1`.
+  - **Notices:** save state, rewind and achievement notices appear in a semi-transparent box at the
+    bottom centre of the picture as well as in the window title; they also show in fullscreen.
+  - **Skipping videos:** the game skips the intro video with START by itself; in other scenes hold
+    **Tab** to fast-forward.
+  - **Anti-aliasing (supersampling):** when the internal resolution is larger than the window, the
+    picture is scaled down by averaging the pixels each screen pixel covers; jagged polygon edges
+    become smooth. The 7× and 8× internal resolutions exist for this (recommended on a 1080p screen;
+    graphics card renderer only, the processor is limited to 6×).
+  - **3D texture filter:** Off, Smooth (bilinear) or **Sharp bilinear** (texture pixels stay sharp,
+    only the border between them is smoothed).
+  - **Advanced › CPU speed:** speeds the emulated PS1 processor up by 150%–300%; the game's own
+    slowdowns in busy scenes shrink (the game itself does not run faster). Loading is shorter too.
+  - **Controls:** choose which controller button triggers each PS1 button (×, ○, □, △, L1/R1,
+    L2/R2, START, SELECT, L3/R3); "Reset to defaults" goes back to the position-based mapping. The
+    d-pad and left stick are fixed; keyboard keys do not change.
+- Settings are saved in `VagrantStory.ini` next to the exe. If "Show this window on every start" is
+  turned off, the game opens directly; to get back to the settings, hold **Shift** while starting
+  the game.
+- The game's start-up and shutdown steps are written to `VagrantStory.log` next to the exe (if
+  something goes wrong it shows where it stopped). If shutdown does not finish in 8 seconds the game
+  ends itself, so no windowless process is left in the background.
+- In game: **F11** / **Alt+Enter** fullscreen, **F4** filter, **F3** aspect ratio (in turn),
+  **Shift+F3** 3D widening, **M** sound; these changes are saved too. **Esc** quits (it asks first).
+- **Internal resolution** draws the 3D scene at 2×–4× resolution: polygon edges and texture mapping
+  become sharp. The game's own VRAM stays at the original resolution (emulation accuracy is kept);
+  the high-resolution copy is only shown on screen. This copy is drawn in 24-bit colour (true
+  colour), so the hard colour bands the PS1's 15-bit colours make in dark scenes do not show.
+  **3D texture smoothing** removes the blocks in low-resolution textures (it also softens 2D text a
+  little).
+- **Speed:** by default the graphics card draws the high-resolution picture (Direct3D 11; PS1
+  textures, semi-transparency, the mask bit and perspective are done in the shader with the same
+  integer maths as the PS1). On laptops with two graphics cards the powerful one (for example
+  NVIDIA) is picked automatically. On this computer (RTX 4060 Laptop), in the heaviest part of the
+  intro cutscene, 5× runs at ≈ 2.8× real time and 6× at ≈ 2.6×; with the processor's integrated
+  graphics (Radeon 780M) 5× runs at ≈ 1.5×. With **Processor** the drawing is spread in strips over
+  all processor cores; heavy scenes then run at ≈ 1.06× at 4× and ≈ 0.8× (slowdown) at 5×.
+  `vs_host --perf` prints the speed every 250 frames (`--gpu-hr` / `--cpu-hr` picks the renderer;
+  headless runs use the processor by default).
+- For the sharpest picture use the **Sharp pixels** filter together with the internal resolution;
+  the Smooth and CRT filters blur the picture on purpose.
+- **Memory card:** saving in the game works. Card 1 is `saves\VagrantStory_kart1.mcr` next to the
+  exe (it can be changed in the settings window). This is the standard 128 KB `.mcr` format other
+  emulators (DuckStation, ePSXe, Mednafen…) read; if the file does not exist an empty, formatted
+  card is created. Changes are written to disk about half a second after the game stops writing,
+  and on exit.
 
-Terminalden başlatılırsa `VagrantStory.exe` günlüğü o terminale yazar. Geliştirme ve hata ayıklama
-seçenekleri için konsol sürümü `build/vs_host.exe` kullanılır.
+File and folder names such as `VagrantStory_kart1.mcr`, `VagrantStory_hileler.txt` and `dokular`
+stay in Turkish in every language, so existing setups keep working.
 
-## Linux, Steam Deck ve Android
+When started from a terminal, `VagrantStory.exe` writes its log to that terminal. For development
+and debugging options use the console build `build/vs_host.exe`.
 
-Linux ve Android sürümü aynı oyun çekirdeğini SDL3 ile çalıştırır (`tools/sdl_host.cpp`): pencere,
-ses, oyun kolu, dokunmatik tuşlar ve oyun içi menü. Görüntüyü işlemci çizer (Direct3D yok); ekrana
-SDL'nin OpenGL / Vulkan / GLES çizicisiyle verilir. Emülasyon Windows ile bire bir aynıdır (aynı kayıt
-durumundan aynı kareler, bayt bayt).
+## Linux, Steam Deck and Android
 
-- **Menü:** Esc, oyun kolunda **L3 + R3** (iki çubuğa birlikte basmak) ya da Guide tuşu, Android'de
-  geri tuşu veya ekranın üstündeki ≡ tuşu. Menüden: durum kaydet / yükle / yuva, ekran oranı,
-  3D genişletme, keskin / yumuşak görüntü, iç çözünürlük (1–4×), PAL 60 Hz, ses, dokunmatik tuşlar,
-  tam ekran, disk değiştirme, çıkış. Oyun menü açıkken durur.
-- **İlk açılış:** Disk ayarlı değilse disk seçme ekranı açılır. Linux / Steam Deck'te pencerenin
-  içinde bir dosya gezgini vardır (Steam'in Oyun Modunda da çalışır); Android'de sistemin dosya
-  seçicisi açılır.
-- **Klavye:** Windows sürümüyle aynı (oklar, Z X A S, Q W E R, Enter, Backspace; F5 / F7 / F6 durum,
-  F8 basılı geri sarma, F3 oran, Shift+F3 3D genişletme, F4 görüntü, M ses, F11 tam ekran, Tab hızlı).
-- **Ayarlar:** Aynı `VagrantStory.ini` biçimi. Linux'ta `~/.local/share/VagrantStory/` klasöründedir
-  (programın yanında `VagrantStory.ini` varsa taşınabilir kullanım için o klasör kullanılır).
-  Kayıtlar, hile dosyası ve doku paketleri (`dokular`) de bu klasöre konur.
-- **RetroAchievements (Linux):** Sistemdeki `libcurl` ile çalışır. Giriş henüz yalnızca Windows'taki
-  ayarlar penceresinden yapılabilir: oradaki `ra_user` / `ra_token` satırlarını Linux'taki ini'ye
-  kopyalamak yeterli. Android'de başarımlar henüz yok.
+The Linux and Android builds run the same game core with SDL3 (`tools/sdl_host.cpp`): window,
+audio, gamepad, touch buttons and an in-game menu. The picture is drawn by the processor (no
+Direct3D) and shown through SDL's OpenGL / Vulkan / GLES renderer. Emulation is exactly the same as
+on Windows (the same save state gives the same frames, byte for byte).
+
+- **Menu:** Esc, **L3 + R3** on a gamepad (press both sticks together) or the Guide button, and on
+  Android the back button or the ≡ button at the top of the screen. From the menu: save / load
+  state / slot, aspect ratio, 3D widening, sharp / smooth picture, internal resolution (1–4×), PAL
+  60 Hz, sound, touch buttons, fullscreen, change disc, quit. The game pauses while the menu is
+  open.
+- **First start:** if no disc is set, a disc picker opens. On Linux / Steam Deck there is a file
+  browser inside the window (it also works in Steam's Game Mode); on Android the system file picker
+  opens.
+- **Keyboard:** the same as on Windows (arrows, Z X A S, Q W E R, Enter, Backspace; F5 / F7 / F6
+  states, hold F8 to rewind, F3 ratio, Shift+F3 3D widening, F4 picture, M sound, F11 fullscreen,
+  Tab fast-forward).
+- **Settings:** the same `VagrantStory.ini` format. On Linux it is in `~/.local/share/VagrantStory/`
+  (if there is a `VagrantStory.ini` next to the program, that folder is used for portable use).
+  Saves, the cheat file and texture packs (`dokular`) go in this folder too.
+- **RetroAchievements (Linux):** works with the system's `libcurl`. Signing in is only possible in
+  the Windows settings window for now: copy the `ra_user` / `ra_token` lines from there into the
+  Linux ini. Achievements are not available on Android yet.
 
 ### Steam Deck
 
-1. Masaüstü Modunda `VagrantStory-Port-…-linux-x64.tar.gz` dosyasını bir klasöre açın.
-2. Steam → Oyun Ekle → Steam Dışı Oyun Ekle ile `VagrantStory` dosyasını ekleyin.
-3. Oyun Modunda başlatın. İlk açılışta disk imajını içerideki dosya gezgininden seçin
-   (`.cue` / `.bin` / `.iso`; PAL için aynı adlı `.sbi` aynı klasörde olmalı).
+1. In Desktop Mode, extract `VagrantStory-Port-…-linux-x64.tar.gz` into a folder.
+2. In Steam → Add a Game → Add a Non-Steam Game, add the `VagrantStory` file.
+3. Start it in Game Mode. On the first start choose the disc image in the built-in file browser
+   (`.cue` / `.bin` / `.iso`; for PAL, the `.sbi` with the same name must be in the same folder).
 
-Deck'te varsayılan tam ekrandır; menü **L3 + R3**. Deck'in kontrolleri Steam Input ile oyun kolu
-olarak gelir (A = ✕, B = ○, X = □, Y = △).
+Fullscreen is the default on the Deck; the menu is **L3 + R3**. The Deck's controls arrive as a
+gamepad through Steam Input (A = ✕, B = ○, X = □, Y = △).
 
 ### Android
 
-APK'yı yükleyip açın, **Disk imajı seç** ile `.bin` (ve PAL için `.sbi`) dosyasını seçin; birden
-fazla dosya birlikte seçilebilir. Dosyalar uygulamanın klasörüne bir kez kopyalanır
-(`Android/data/io.github.aligothenburg.vagrantstory/files/`; ayarlar ve kayıtlar da orada).
-`.cue` gerekmez. Ekrana dokununca dokunmatik tuşlar görünür, oyun kolu kullanılınca gizlenir.
-Telefonda varsayılan iç çözünürlük 1×'tir (görüntüyü işlemci çizer); güçlü cihazlarda menüden
-artırılabilir.
+Install and open the APK, then choose the `.bin` (and for PAL the `.sbi`) file with **Choose disc
+image**; several files can be chosen at once. The files are copied once into the app's folder
+(`Android/data/io.github.aligothenburg.vagrantstory/files/`; settings and saves live there too).
+No `.cue` is needed. Touch the screen to show the touch buttons; they hide when a gamepad is used.
+On phones the default internal resolution is 1× (the processor draws the picture); it can be raised
+from the menu on powerful devices.
 
-**Ana ekran simgesi:** İlk açılışta oyun, açılış videosunun sonundaki Rood Inverse'i arka planda
-kendi diskinizden yakalar (yarım dakika kadar sürer, oyunu yavaşlatmaz) ve telefon "Ana ekrana
-eklensin mi?" diye sorar. Onaylarsanız ana ekranda bu resimle oyunu açan bir kısayol çıkar. Resim
-`kapak.png` olarak uygulama klasörüne kaydedilir; kısayol menüdeki **Ana ekran simgesi** ile
-yeniden istenebilir.
+**Home screen icon:** on the first start the game captures Rood Inverse from the end of the intro
+video, from your own disc, in the background (it takes about half a minute and does not slow the
+game down), and the phone asks whether to add it to the home screen. If you agree, a shortcut with
+this picture that opens the game appears on the home screen. The picture is saved as `kapak.png` in
+the app folder; the shortcut can be requested again with **Home screen icon** in the menu.
 
-## Derleme
+## Building
 
 ```powershell
 ./build.ps1
 ```
 
-**Linux** (SDL3 kaynağını CMake kendisi indirir; `-DVSPORT_SDL_SOURCE_DIR=...` ile yerel bir
-klasör de verilebilir):
+**Linux** (CMake downloads the SDL3 source by itself; a local folder can be given with
+`-DVSPORT_SDL_SOURCE_DIR=...`):
 
 ```bash
 sudo apt install build-essential cmake ninja-build libasound2-dev libpulse-dev libx11-dev libxext-dev \
@@ -234,98 +262,107 @@ cmake -S . -B build/linux -G Ninja -DCMAKE_BUILD_TYPE=Release -DVSPORT_LINK_AOT=
 cmake --build build/linux
 ```
 
-`build/linux/VagrantStory` oyunun kendisidir (SDL3 ve C++ çalışma kütüphanesi içine bağlıdır;
-yalnızca `glibc` 2.38+ gerekir), `vs_host` başsız test aracıdır.
+`build/linux/VagrantStory` is the game itself (SDL3 and the C++ runtime are linked in; only
+`glibc` 2.38+ is needed); `vs_host` is the headless test tool.
 
-**Android** (JDK 17 ve Android SDK + NDK 29 gerekir):
+**Android** (needs JDK 17 and the Android SDK + NDK 29):
 
 ```powershell
 cd android
 ./gradlew assembleRelease
 ```
 
-APK: `android/app/build/outputs/apk/release/app-release.apk` (arm64 ve x86_64).
+APK: `android/app/build/outputs/apk/release/app-release.apk` (arm64 and x86_64).
 
-## Disk İmajı
+### Adding translated text
 
-Araçlar kendi Vagrant Story disk imajınızı (`.cue` + `.bin`) kullanır. Aşağıdaki komutlar disk yolunu
-`$Disc` değişkeninden okur; önce PowerShell oturumunda bunu kendi yolunuza göre ayarlayın:
+Player-facing text is written at the call site as `txt("English", "Türkçe")` (see
+`include/vsport/i18n.hpp`). Log lines, console output and comments are English only. The SDL
+on-screen font is ASCII only, so the Turkish halves in `tools/sdl_host.cpp` are written without
+Turkish letters.
+
+## Disc image
+
+The tools use your own Vagrant Story disc image (`.cue` + `.bin`). The commands below read the disc
+path from the `$Disc` variable; set it to your own path in the PowerShell session first:
 
 ```powershell
-$Disc = "C:\Users\anari\Downloads\Minerva_Myrient\Redump\Sony - PlayStation\Vagrant Story (Europe)\Vagrant Story (Europe).cue"
+$Disc = "D:\Games\Vagrant Story (Europe)\Vagrant Story (Europe).cue"
 ```
 
-### Alt kanal verisi (.sbi) — PAL sürümü için gerekli
+### Subchannel data (.sbi) — needed for the PAL release
 
-Avrupa sürümü (SLES-02754) **LibCrypt** korumalıdır: New Game'de birkaç sektörün alt kanal (Q)
-verisini kontrol eder. `.bin` imajı bu veriyi içermez; diskin Redump `.sbi` dosyası olmadan oyun
-New Game'den sonra "NOW LOADING"de kalır. `.sbi` dosyasını `.cue` ile aynı klasöre aynı adla
-koyarsanız otomatik yüklenir; başka bir yerdeyse `--sbi` ile belirtin:
+The European release (SLES-02754) is protected by **LibCrypt**: on New Game it checks the
+subchannel (Q) data of a few sectors. A `.bin` image does not contain this data; without the disc's
+Redump `.sbi` file the game hangs at "NOW LOADING" after New Game. Put the `.sbi` file next to the
+`.cue` with the same name and it is loaded automatically; if it is somewhere else, give it with
+`--sbi`:
 
 ```powershell
-$Sbi = "C:\Users\anari\Downloads\Vagrant Story (Europe)\Vagrant Story (Europe).sbi"
+$Sbi = "D:\Games\Vagrant Story (Europe)\Vagrant Story (Europe).sbi"
 ./build/vs_host.exe --disc $Disc --sbi $Sbi
 ```
 
-ABD sürümünde (SLUS-01040) bu koruma yoktur.
+The US release (SLUS-01040) has no such protection.
 
-> **Not:** `generated_recomp/` diskten üretilen koddur ve `.gitignore` ile depo dışında tutulur
-> (oyunun kodunun birebir çevirisi olduğu için paylaşılmamalıdır). Yeni bir klonda önce `vs_recomp`
-> ile üretin, ardından `./build.ps1` ile derleyin; klasör yoksa `vs_host` AOT modülleri olmadan
-> yalnızca yorumlayıcıyla derlenir.
+> **Note:** `generated_recomp/` is code generated from the disc and is kept out of the repository
+> by `.gitignore` (it is a direct translation of the game's code, so it must not be shared). In a
+> fresh clone, generate it first with `vs_recomp`, then build with `./build.ps1`; without the folder
+> `vs_host` is built without AOT modules and runs on the interpreter only.
 
-## Araçların Kullanımı
+## Using the tools
 
-1. **Disk İmajını İnceleme ve Overlay Analizi (`vs_inspect`):**
+1. **Inspecting the disc image and overlays (`vs_inspect`):**
    ```powershell
    ./build/vs_inspect.exe --disc $Disc --extract-dir extracted
 
-   # Çekirdek EXE'yi ya da bir overlay'i yükleme adresinde disassemble etme:
+   # Disassemble the core EXE or an overlay at its load address:
    ./build/vs_inspect.exe --disc $Disc --disasm 0x80010B14 64
    ./build/vs_inspect.exe --disc $Disc --prg BATTLE/BATTLE.PRG --disasm 0x800D51D0 40
    ```
 
-2. **Statik C++20 Kod Üretimi (`vs_recomp`):**
+2. **Static C++20 code generation (`vs_recomp`):**
    ```powershell
    ./build/vs_recomp.exe --disc $Disc --out-dir generated_recomp
    ```
 
-3. **Yerel Windows Host Uygulaması (`vs_host`):**
+3. **Native Windows host (`vs_host`):**
    ```powershell
-   # Donanım (GTE + DMA6 OTC + DMA2 GPU + Win32) canlı doğrulama demosu:
+   # Live hardware check demo (GTE + DMA6 OTC + DMA2 GPU + Win32):
    ./build/vs_host.exe --self-demo
 
-   # Disk imajıyla önyükleme (pencere modunda Native C++20 AOT aktif):
+   # Boot from the disc image (native C++20 AOT is active in window mode):
    ./build/vs_host.exe --disc $Disc --sbi $Sbi
 
-   # Headless çalıştırma sonunda PS1 RAM'ini (2 MB) dosyaya dökme (hata ayıklama):
+   # Dump PS1 RAM (2 MB) to a file at the end of a headless run (debugging):
    ./build/vs_host.exe --disc $Disc --sbi $Sbi --headless --cycles 900000000 --dump-ram ram.bin
 
-   # Headless modda belirli VBlank karelerinde tuş basma (BUTON@VBLANK[:KARE], virgülle ayrılır):
+   # Press buttons on given vblanks in headless mode (BUTTON@VBLANK[:FRAMES], comma separated):
    ./build/vs_host.exe --disc $Disc --headless --cycles 470000000 --press START@370,START@430,DOWN@650:4 --dump-display menu.ppm
 
-   # Her N karede bir ekran görüntüsü kaydetme (ör. 1x ile 4x'i kare kare karşılaştırmak için);
-   # --rim 0/1/2 karakter kenar ışığını seçer:
-   ./build/vs_host.exe --disc $Disc --sbi $Sbi --headless --cycles 20000000000 --scale 4 --dump-series kareler 50
+   # Save a screenshot every N frames (for example to compare 1× with 4× frame by frame);
+   # --rim 0/1/2 picks the character rim light:
+   ./build/vs_host.exe --disc $Disc --sbi $Sbi --headless --cycles 20000000000 --scale 4 --dump-series frames 50
 
-   # Headless performans, 24-bit aktif ekran / VRAM ve 44.1 kHz WAV ses çıktısı testi:
+   # Headless performance, 24-bit display / VRAM and 44.1 kHz WAV audio output test:
    ./build/vs_host.exe --disc $Disc --headless --cycles 1150000000 --dump-display fmv.ppm --dump-wav spu.wav
 
-   # Birim testleri; ikincisi ekran kartı çizicisini işlemciyle karşılaştırır (her tür primitif,
-   # yarı saydamlık, maske, doku penceresi, perspektif, kendi alanından dokulanan sprite).
-   # Microsoft'un WARP yazılım cihazında çalışır, ekran kartı gerekmez:
+   # Unit tests; the second compares the graphics card renderer with the processor (every kind of
+   # primitive, semi-transparency, mask, texture window, perspective, sprites textured from their
+   # own area). It runs on Microsoft's WARP software device, no graphics card needed:
    ./build/vsport_tests.exe
    ./build/vsport_gpu_tests.exe
    ```
-   Oyun, seçtiği video kipine göre gerçek zamanlı hızda (PAL 50 Hz / NTSC 60 Hz) çalışır.
+   The game runs at real-time speed for the video mode it picks (PAL 50 Hz / NTSC 60 Hz).
 
-   **Kontroller:** Klavye ve gamepad birlikte kullanılabilir; kontrolcü oyun açıkken de takılabilir.
-   Xbox ve XInput uyumlu kontrolcüler XInput ile, DualShock 4 / DualSense ve diğer genel
-   gamepad'ler DirectInput ile okunur. Sol analog çubuk yön tuşu gibi davranır.
+   **Controls:** keyboard and gamepad can be used together; a controller can be plugged in while
+   the game is running. Xbox and XInput compatible controllers are read through XInput,
+   DualShock 4 / DualSense and other generic gamepads through DirectInput. The left analogue stick
+   acts like the d-pad.
 
-   | PS1 | Klavye | Xbox (XInput) | DualShock 4 / DualSense |
+   | PS1 | Keyboard | Xbox (XInput) | DualShock 4 / DualSense |
    |---|---|---|---|
-   | Yön | Ok tuşları | D-pad / sol çubuk | D-pad / sol çubuk |
+   | D-pad | Arrow keys | D-pad / left stick | D-pad / left stick |
    | × | `Z` | A | × |
    | ○ | `X` | B | ○ |
    | □ | `A` | X | □ |
@@ -334,15 +371,16 @@ ABD sürümünde (SLUS-01040) bu koruma yoktur.
    | L2 / R2 | `E` / `R` | LT / RT | L2 / R2 |
    | START | `Enter` | Menu (Start) | Options |
    | SELECT | `Backspace` | View (Back) | Share / Create |
-   | Serbest kamera | `J` / `L` döndür, `I` / `K` eğ | sağ çubuk | sağ çubuk |
+   | Free camera | `J` / `L` turn, `I` / `K` tilt | right stick | right stick |
 
-   **Serbest kamera:** Sağ çubuk kamerayı oyunun 45 derecelik L1/R1 adımlarına bağlı kalmadan
-   istediğiniz açıya döndürür (sağ-sol) ve eğer (yukarı-aşağı). Yürüyüş yönü kameraya uyar; L1/R1
-   yine çalışır ve en yakın 45 derecelik açıya oturur. Kamera yalnızca sağ çubuğa dokunduğunuzda ve
-   oyun alan kamerasını kullanırken değişir (başlık ekranında hiçbir şey yapmaz). **Kontroller** sayfasından
-   kapatılabilir (`free_camera=0`). Avrupa ve ABD sürümlerinde çalışır.
+   **Free camera:** the right stick turns the camera (left-right) and tilts it (up-down) to any
+   angle, without being tied to the game's 45-degree L1/R1 steps. Walking direction follows the
+   camera; L1/R1 still work and snap to the nearest 45-degree angle. The camera only changes when
+   you touch the right stick and while the game is using its field camera (it does nothing on the
+   title screen). It can be turned off on the **Controls** page (`free_camera=0`). Works on the
+   European and US releases.
 
-   Kontrolcü tuşları ayar penceresindeki **Kontroller** sayfasından değiştirilebilir
-   (`VagrantStory.ini` içinde `pad_cross=circle` gibi satırlar olarak saklanır).
+   Controller buttons can be changed on the **Controls** page of the settings window (stored in
+   `VagrantStory.ini` as lines such as `pad_cross=circle`).
 
-   *Pencere Kısayolları:* `F11` / `Alt+Enter` Tam ekran | `Tab` (basılı tut) Hızlı ileri | `F2` Tam 1024×512 VRAM | `F3` Görüntü oranı (4:3 → 10:7 → 3:2 → 16:10 → 16:9 → doldur) | `Shift+F3` 3D genişletme (GTE) | `F4` HLSL Shader Kipi (Keskin / Bilinear / Trinitron CRT) | `M` Ses Aç/Kapat | `F12` PPM Kaydet | `ESC` Çıkış
+   *Window shortcuts:* `F11` / `Alt+Enter` fullscreen | `Tab` (hold) fast-forward | `F2` full 1024×512 VRAM | `F3` aspect ratio (4:3 → 10:7 → 3:2 → 16:10 → 16:9 → fill) | `Shift+F3` 3D widening (GTE) | `F4` HLSL shader mode (sharp / bilinear / Trinitron CRT) | `M` sound on/off | `F12` save PPM | `ESC` quit

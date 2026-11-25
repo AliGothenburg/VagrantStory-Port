@@ -1,4 +1,5 @@
 #include "vsport/d3d11_renderer.hpp"
+#include "vsport/i18n.hpp"
 #include "vsport/d3d11_hr_backend.hpp"
 
 #ifdef _WIN32
@@ -323,11 +324,11 @@ void* D3D11Renderer::device_handle() const noexcept {
 
 const char* D3D11Renderer::shader_mode_name() const noexcept {
     switch (shader_mode_) {
-        case UpscaleShaderMode::SharpPixel:   return "Keskin Piksel (Anti-Shimmer)";
-        case UpscaleShaderMode::SmoothLinear: return "Yumusak Bilinear";
+        case UpscaleShaderMode::SharpPixel:   return txt("Sharp pixels (anti-shimmer)", "Keskin Piksel (Anti-Shimmer)");
+        case UpscaleShaderMode::SmoothLinear: return txt("Smooth bilinear", "Yumuşak Bilinear");
         case UpscaleShaderMode::TrinitronCrt: return "Trinitron CRT";
     }
-    return "Keskin Piksel";
+    return txt("Sharp pixels", "Keskin Piksel");
 }
 
 #ifdef _WIN32
@@ -380,7 +381,7 @@ bool D3D11Renderer::initialize(HWND hwnd, u32 width, u32 height, std::string* er
             &impl_->swapchain, &impl_->device, &chosen, &impl_->context);
     }
     if (FAILED(hr)) {
-        if (err) *err = "D3D11CreateDeviceAndSwapChain basarisiz oldu.";
+        if (err) *err = "D3D11CreateDeviceAndSwapChain failed.";
         return false;
     }
 
@@ -399,7 +400,7 @@ bool D3D11Renderer::initialize(HWND hwnd, u32 width, u32 height, std::string* er
     }
 
     if (!impl_->create_rtv()) {
-        if (err) *err = "D3D11 RenderTargetView olusturulamadi.";
+        if (err) *err = "Could not create the D3D11 RenderTargetView.";
         shutdown();
         return false;
     }
@@ -418,7 +419,7 @@ bool D3D11Renderer::initialize(HWND hwnd, u32 width, u32 height, std::string* er
 
     if (FAILED(impl_->device->CreateTexture2D(&td, nullptr, &impl_->vram_tex)) ||
         FAILED(impl_->device->CreateShaderResourceView(impl_->vram_tex.Get(), nullptr, &impl_->vram_srv))) {
-        if (err) *err = "1024x512 R16_UINT VRAM dokusu olusturulamadi.";
+        if (err) *err = "Could not create the 1024x512 R16_UINT VRAM texture.";
         shutdown();
         return false;
     }
@@ -445,7 +446,7 @@ bool D3D11Renderer::initialize(HWND hwnd, u32 width, u32 height, std::string* er
 
     if (FAILED(impl_->device->CreateVertexShader(vs_blob->GetBufferPointer(), vs_blob->GetBufferSize(), nullptr, &impl_->vs)) ||
         FAILED(impl_->device->CreatePixelShader(ps_blob->GetBufferPointer(), ps_blob->GetBufferSize(), nullptr, &impl_->ps))) {
-        if (err) *err = "HLSL shader nesneleri olusturulamadi.";
+        if (err) *err = "Could not create the HLSL shader objects.";
         shutdown();
         return false;
     }
@@ -477,7 +478,7 @@ bool D3D11Renderer::initialize(HWND hwnd, u32 width, u32 height, std::string* er
     cbd.BindFlags      = D3D11_BIND_CONSTANT_BUFFER;
     cbd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
     if (FAILED(impl_->device->CreateBuffer(&cbd, nullptr, &impl_->cbuffer))) {
-        if (err) *err = "D3D11 ConstantBuffer olusturulamadi.";
+        if (err) *err = "Could not create the D3D11 constant buffer.";
         shutdown();
         return false;
     }

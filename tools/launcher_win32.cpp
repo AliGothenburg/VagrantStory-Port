@@ -1,7 +1,8 @@
-﻿#include "launcher_win32.hpp"
+#include "launcher_win32.hpp"
 #include "achievements.hpp"
 
 #include "vsport/cdrom_iso.hpp"
+#include "vsport/i18n.hpp"
 #include "vsport/d3d11_hr_backend.hpp" // list_graphics_adapters
 
 #include <algorithm>
@@ -96,6 +97,7 @@ GameSettings load_settings(const std::filesystem::path& ini) {
         else if (key == "texture_dump")  s.texture_dump = num != 0;
         else if (key == "rewind")        s.rewind = num != 0;
         else if (key == "cpu_overclock") s.cpu_overclock = clamp_int(num, 100, 400);
+        else if (key == "language")      s.language = clamp_int(num, 0, 2);
         else if (key.rfind("pad_", 0) == 0) {
             const int target = pad::remap_index_from_name(key.substr(4));
             const int source = pad::remap_index_from_name(val);
@@ -104,29 +106,30 @@ GameSettings load_settings(const std::filesystem::path& ini) {
     }
     if (!have_height && legacy_scale > 0) s.window_height = 240 * legacy_scale;
     if (!have_aspect && s.widescreen) s.aspect = ASPECT_16_9; // Older "16:9" checkbox meant both
+    set_language(language_from_setting(s.language));
     return s;
 }
 
 void save_settings(const std::filesystem::path& ini, const GameSettings& s) {
     std::ofstream out(ini, std::ios::binary | std::ios::trunc);
-    out << "# Vagrant Story Native Port ayarlari (oyunu Shift ile baslatinca ayar penceresi acilir)\n";
+    out << "# Vagrant Story Native Port settings (hold Shift while starting the game to open the settings window)\n";
     out << "disc=" << path_to_utf8(s.disc) << "\n";
     out << "sbi=" << path_to_utf8(s.sbi) << "\n";
     out << "memcard=" << path_to_utf8(s.memcard) << "\n";
     out << "fullscreen=" << (s.fullscreen ? 1 : 0) << "\n";
     out << "window_height=" << s.window_height << "\n";
-    out << "# aspect: 0=4:3 1=10:7 2=3:2 3=16:10 4=16:9 5=pencereyi doldur\n";
+    out << "# aspect: 0=4:3 1=10:7 2=3:2 3=16:10 4=16:9 5=fill the window\n";
     out << "aspect=" << s.aspect << "\n";
     out << "internal_scale=" << s.internal_scale << "\n";
-    out << "# renderer: yuksek cozunurluk cizimi 0=ekran karti (Direct3D 11) 1=islemci\n";
+    out << "# renderer: upscaled picture drawn by 0=graphics card (Direct3D 11) 1=processor\n";
     out << "renderer=" << s.renderer << "\n";
-    out << "# gpu: ekran karti adi; bos = otomatik (en guclu)\n";
+    out << "# gpu: graphics card name; empty = automatic (the most powerful one)\n";
     out << "gpu=" << s.gpu << "\n";
-    out << "# texture_filter: 3D doku filtresi 0=kapali 1=yumusak (bilinear) 2=keskin yumusatma\n";
+    out << "# texture_filter: 3D texture filter 0=off 1=smooth (bilinear) 2=sharp bilinear\n";
     out << "texture_filter=" << s.texture_filter << "\n";
-    out << "# rim_light: karakter kenar isigi 0=yumusak 1=keskin 2=kapali\n";
+    out << "# rim_light: character rim light 0=soft 1=sharp 2=off\n";
     out << "rim_light=" << s.rim_light << "\n";
-    out << "# pgxp: kose hassasiyeti 0=kapali (orijinal) 1=titreme duzeltmesi 2=titreme duzeltmesi + perspektifli doku\n";
+    out << "# pgxp: vertex precision 0=off (original) 1=wobble fix 2=wobble fix + perspective-correct textures\n";
     out << "pgxp=" << s.pgxp << "\n";
     out << "filter=" << s.filter << "\n";
     out << "integer_scale=" << (s.integer_scale ? 1 : 0) << "\n";
@@ -134,36 +137,38 @@ void save_settings(const std::filesystem::path& ini, const GameSettings& s) {
     out << "muted=" << (s.muted ? 1 : 0) << "\n";
     out << "volume=" << s.volume << "\n";
     out << "show_launcher=" << (s.show_launcher ? 1 : 0) << "\n";
-    out << "# rumble: titresim (DualShock; XInput kontrolculer)\n";
+    out << "# rumble: vibration (DualShock; XInput controllers)\n";
     out << "rumble=" << (s.rumble ? 1 : 0) << "\n";
-    out << "# free_camera: sag cubukla serbest kamera (klavye J/L/I/K)\n";
+    out << "# free_camera: free camera with the right stick (keyboard J/L/I/K)\n";
     out << "free_camera=" << (s.free_camera ? 1 : 0) << "\n";
-    out << "# autosave: cikarken durumu kaydet, acilista kaldigin yerden devam et; rewind: F8 ile geri sarma\n";
+    out << "# autosave: save the state on exit and continue from it on start; rewind: hold F8 to rewind\n";
     out << "autosave=" << (s.autosave ? 1 : 0) << "\n";
     out << "rewind=" << (s.rewind ? 1 : 0) << "\n";
-    out << "# cheats: VagrantStory_hileler.txt dosyasindaki hile kodlarini uygula\n";
+    out << "# cheats: apply the cheat codes in VagrantStory_hileler.txt\n";
     out << "cheats=" << (s.cheats ? 1 : 0) << "\n";
-    out << "# reverb: PS1 yanki birimi; audio_cubic: kubik ses ara degerlemesi\n";
+    out << "# reverb: PS1 reverb unit; audio_cubic: cubic audio interpolation\n";
     out << "reverb=" << (s.reverb ? 1 : 0) << "\n";
     out << "audio_cubic=" << (s.audio_cubic ? 1 : 0) << "\n";
-    out << "# texture_pack: dokular klasorundeki degistirme dokulari; texture_dump: dokulari dokular\\_dokum klasorune dok\n";
+    out << "# texture_pack: replacement textures from the dokular folder; texture_dump: dump textures into dokular\\_dokum\n";
     out << "texture_pack=" << (s.texture_pack ? 1 : 0) << "\n";
-    out << "# frame_interp: ara kare uretimi (25 -> 50 fps, ekran karti cizimi)\n";
+    out << "# frame_interp: frame interpolation (25 -> 50 fps, graphics card renderer)\n";
     out << "frame_interp=" << (s.frame_interp ? 1 : 0) << "\n";
-    out << "# runahead: gecikme azaltma, ileri calistirilan kare sayisi (0-3)\n";
+    out << "# runahead: input lag reduction, frames run ahead (0-3)\n";
     out << "runahead=" << s.runahead << "\n";
-    out << "# pal60: Avrupa (PAL) diskini 60 Hz'de, ABD surumu hizinda calistir\n";
+    out << "# pal60: run the European (PAL) disc at 60 Hz, at US speed\n";
     out << "pal60=" << (s.pal60 ? 1 : 0) << "\n";
-    out << "# RetroAchievements: kullanici adi ve sunucunun verdigi oturum anahtari (sifre saklanmaz)\n";
+    out << "# RetroAchievements: user name and the session token from the server (the password is never stored)\n";
     out << "ra_enabled=" << (s.ra_enabled ? 1 : 0) << "\n";
     out << "ra_user=" << s.ra_user << "\n";
     out << "ra_token=" << s.ra_token << "\n";
     out << "texture_dump=" << (s.texture_dump ? 1 : 0) << "\n";
-    out << "# touch_controls: ekran dokunmatik tuslari (Android/Linux) 0=ekrana dokununca 1=her zaman 2=hic\n";
+    out << "# touch_controls: on-screen buttons (Android/Linux) 0=when the screen is touched 1=always 2=never\n";
     out << "touch_controls=" << s.touch_controls << "\n";
-    out << "# cpu_overclock: emule edilen islemci hizi, yuzde (100 = orijinal)\n";
+    out << "# cpu_overclock: emulated CPU speed in percent (100 = original)\n";
     out << "cpu_overclock=" << s.cpu_overclock << "\n";
-    out << "# Kontrolcu tuslari: pad_<PS1 tusu>=<kontrolcude o konumdaki tus> (none = atanmamis)\n";
+    out << "# language: texts in the program 0=follow the system 1=English 2=Turkish\n";
+    out << "language=" << s.language << "\n";
+    out << "# Controller buttons: pad_<PS1 button>=<controller button in that position> (none = not assigned)\n";
     for (std::size_t i = 0; i < pad::REMAP_COUNT; ++i) {
         const int src = s.pad_map[i];
         out << "pad_" << pad::REMAP_NAMES[i] << "="
@@ -271,7 +276,7 @@ enum ControlId : int {
     ID_RES_COMBO, ID_TEXFILTER_CHECK,
     ID_CARD_EDIT, ID_CARD_CHANGE, ID_CARD_OPEN,
     ID_MUTE_CHECK, ID_VOLUME_SLIDER, ID_VOLUME_LABEL,
-    ID_SHOW_CHECK, ID_ASPECT_COMBO, ID_RIM_COMBO, ID_PGXP_COMBO, ID_RENDERER_COMBO, ID_GPU_COMBO, ID_RUMBLE_CHECK, ID_FREECAM_CHECK,ID_OVERCLOCK_COMBO, ID_AUTOSAVE_CHECK, ID_REWIND_CHECK, ID_CHEATS_CHECK, ID_CHEATS_OPEN, ID_REVERB_CHECK, ID_CUBIC_CHECK, ID_TEXPACK_CHECK, ID_TEXPACK_OPEN, ID_TEXDUMP_CHECK, ID_INTERP_CHECK, ID_RUNAHEAD_COMBO, ID_RA_CHECK, ID_RA_USER, ID_RA_PASS, ID_RA_LOGIN, ID_RA_LOGOUT, ID_RA_STATUS, ID_PAL60_CHECK,
+    ID_SHOW_CHECK, ID_ASPECT_COMBO, ID_RIM_COMBO, ID_PGXP_COMBO, ID_RENDERER_COMBO, ID_GPU_COMBO, ID_RUMBLE_CHECK, ID_FREECAM_CHECK,ID_OVERCLOCK_COMBO, ID_AUTOSAVE_CHECK, ID_REWIND_CHECK, ID_CHEATS_CHECK, ID_CHEATS_OPEN, ID_REVERB_CHECK, ID_CUBIC_CHECK, ID_TEXPACK_CHECK, ID_TEXPACK_OPEN, ID_TEXDUMP_CHECK, ID_INTERP_CHECK, ID_RUNAHEAD_COMBO, ID_RA_CHECK, ID_RA_USER, ID_RA_PASS, ID_RA_LOGIN, ID_RA_LOGOUT, ID_RA_STATUS, ID_PAL60_CHECK, ID_LANG_COMBO,
     ID_PAD_COMBO0 = 300, // .. ID_PAD_COMBO0 + REMAP_COUNT - 1
     ID_PAD_DEFAULTS = 400,
     ID_NAV0 = 500,       // .. ID_NAV0 + PAGE_COUNT - 1: page buttons on the left
@@ -279,7 +284,9 @@ enum ControlId : int {
 
 // Pages of the settings window (buttons on the left). A new group of settings = a new page.
 enum Page : int { PAGE_GAME, PAGE_GRAPHICS, PAGE_DISPLAY, PAGE_SOUND, PAGE_CONTROLS, PAGE_ADVANCED, PAGE_ACHIEVEMENTS, PAGE_COUNT };
-constexpr const wchar_t* PAGE_NAMES[PAGE_COUNT] = {L"Oyun", L"Grafik", L"Ekran", L"Ses", L"Kontroller", L"Gelişmiş", L"Başarımlar"};
+constexpr const wchar_t* PAGE_NAMES_EN[PAGE_COUNT] = {L"Game", L"Graphics", L"Display", L"Sound", L"Controls", L"Advanced", L"Achievements"};
+constexpr const wchar_t* PAGE_NAMES_TR[PAGE_COUNT] = {L"Oyun", L"Grafik", L"Ekran", L"Ses", L"Kontroller", L"Gelişmiş", L"Başarımlar"};
+const wchar_t* page_name(int p) { return txt(PAGE_NAMES_EN[p], PAGE_NAMES_TR[p]); }
 constexpr int OVERCLOCK_VALUES[] = {100, 150, 200, 300};
 
 // Layout (logical px): title on top, page buttons on the left, the page on the right, footer below
@@ -297,8 +304,9 @@ struct LauncherState {
     HWND hwnd         = nullptr;
     bool disc_ok      = false;  // A readable disc image is selected (enables "Oyna")
     bool status_good  = false;  // ...and nothing else is missing (.sbi for the PAL release)
-    std::vector<std::string> gpus; // Graphics cards in the "Ekran kartı" list (after "automatic")
+    std::vector<std::string> gpus; // Graphics cards in the "Graphics card" list (after "automatic")
     int building_page = -1;        // Controls made now belong to this page (-1 = always visible)
+    int page = 0;                  // Page shown now
     std::vector<HWND> pages[PAGE_COUNT];
 
     int px(int v) const { return static_cast<int>(v * dpi + 0.5f); }
@@ -330,7 +338,7 @@ void update_ra_status(LauncherState& st, const std::wstring& extra = {});
 
 void update_ra_status(LauncherState& st, const std::wstring& extra) {
     const GameSettings& s = *st.s;
-    const std::wstring t = !extra.empty() ? extra : (!s.ra_token.empty() ? L"Giriş yapıldı: " + widen(s.ra_user) : L"Giriş yapılmadı");
+    const std::wstring t = !extra.empty() ? extra : (!s.ra_token.empty() ? txt(L"Signed in: ", L"Giriş yapıldı: ") + widen(s.ra_user) : txt(L"Not signed in", L"Giriş yapılmadı"));
     SetWindowTextW(item(st, ID_RA_STATUS), t.c_str());
 }
 
@@ -345,14 +353,14 @@ void update_status(LauncherState& st) {
     st.status_good = false;
     std::error_code ec;
     if (s.disc.empty()) {
-        status = L"Oyun klasörünü ya da disk imajını (.cue / .bin / .iso) seçin.";
+        status = txt(L"Choose the game folder or the disc image (.cue / .bin / .iso).", L"Oyun klasörünü ya da disk imajını (.cue / .bin / .iso) seçin.");
     } else if (!std::filesystem::exists(s.disc, ec)) {
-        status = L"⚠ Disk imajı bulunamadı. Lütfen yeniden seçin.";
+        status = txt(L"⚠ Disc image not found. Please choose it again.", L"⚠ Disk imajı bulunamadı. Lütfen yeniden seçin.");
     } else {
         DiscImage probe;
         std::string err;
         if (!probe.open(s.disc, &err)) {
-            status = L"⚠ Disk açılamadı: " + widen(err);
+            status = txt(L"⚠ Could not open the disc: ", L"⚠ Disk açılamadı: ") + widen(err);
         } else {
             st.disc_ok = true;
             bool sbi_loaded = probe.subq_override_count() > 0;
@@ -361,18 +369,18 @@ void update_status(LauncherState& st) {
             }
             const std::string& vol = probe.volume_id();
             if (vol == "SLES-02754") {
-                status = L"✓ Vagrant Story — Avrupa sürümü (PAL, SLES-02754)\n";
-                status += sbi_loaded ? L"✓ LibCrypt alt kanal verisi (.sbi) hazır"
-                                     : L"⚠ Bu sürüm .sbi dosyası ister; yoksa New Game'den sonra takılır";
+                status = txt(L"✓ Vagrant Story — European release (PAL, SLES-02754)\n", L"✓ Vagrant Story — Avrupa sürümü (PAL, SLES-02754)\n");
+                status += sbi_loaded ? txt(L"✓ LibCrypt subchannel data (.sbi) ready", L"✓ LibCrypt alt kanal verisi (.sbi) hazır")
+                                     : txt(L"⚠ This release needs a .sbi file; without it the game hangs after New Game", L"⚠ Bu sürüm .sbi dosyası ister; yoksa New Game'den sonra takılır");
                 st.status_good = sbi_loaded;
             } else if (vol == "SLUS-01040") {
-                status = L"✓ Vagrant Story — ABD sürümü (NTSC, SLUS-01040)\n.sbi gerekmez";
+                status = txt(L"✓ Vagrant Story — US release (NTSC, SLUS-01040)\nNo .sbi needed", L"✓ Vagrant Story — ABD sürümü (NTSC, SLUS-01040)\n.sbi gerekmez");
                 st.status_good = true;
             } else if (vol == "SLPS-02377") {
-                status = L"✓ Vagrant Story — Japonya sürümü (NTSC-J, SLPS-02377)";
+                status = txt(L"✓ Vagrant Story — Japanese release (NTSC-J, SLPS-02377)", L"✓ Vagrant Story — Japonya sürümü (NTSC-J, SLPS-02377)");
                 st.status_good = true;
             } else {
-                status = L"⚠ Tanınmayan disk: " + widen(vol) + L"\nBu port Vagrant Story için yapıldı.";
+                status = txt(L"⚠ Unknown disc: ", L"⚠ Tanınmayan disk: ") + widen(vol) + txt(L"\nThis port is made for Vagrant Story.", L"\nBu port Vagrant Story için yapıldı.");
             }
         }
     }
@@ -413,12 +421,21 @@ int selected_window_height(const LauncherState& st) {
 }
 
 // PS1 buttons, in pad::REMAP_BITS order
-constexpr const wchar_t* PS1_BUTTON_NAMES[pad::REMAP_COUNT] = {
+constexpr const wchar_t* PS1_BUTTON_NAMES_EN[pad::REMAP_COUNT] = {
+    L"×  Cross", L"○  Circle", L"□  Square", L"△  Triangle", L"L1", L"R1",
+    L"L2", L"R2", L"START", L"SELECT", L"L3", L"R3",
+};
+constexpr const wchar_t* PS1_BUTTON_NAMES_TR[pad::REMAP_COUNT] = {
     L"×  Çarpı", L"○  Daire", L"□  Kare", L"△  Üçgen", L"L1", L"R1",
     L"L2", L"R2", L"START", L"SELECT", L"L3", L"R3",
 };
 // Physical controller buttons by position (Xbox name / PlayStation name), same order
-constexpr const wchar_t* PHYSICAL_BUTTON_NAMES[pad::REMAP_COUNT] = {
+constexpr const wchar_t* PHYSICAL_BUTTON_NAMES_EN[pad::REMAP_COUNT] = {
+    L"Bottom face button  (A / ×)", L"Right face button  (B / ○)", L"Left face button  (X / □)", L"Top face button  (Y / △)",
+    L"Left bumper  (LB / L1)", L"Right bumper  (RB / R1)", L"Left trigger  (LT / L2)", L"Right trigger  (RT / R2)",
+    L"Start / Options", L"Back / Share", L"Left stick press  (L3)", L"Right stick press  (R3)",
+};
+constexpr const wchar_t* PHYSICAL_BUTTON_NAMES_TR[pad::REMAP_COUNT] = {
     L"Alt yüz tuşu  (A / ×)", L"Sağ yüz tuşu  (B / ○)", L"Sol yüz tuşu  (X / □)", L"Üst yüz tuşu  (Y / △)",
     L"Sol omuz  (LB / L1)", L"Sağ omuz  (RB / R1)", L"Sol tetik  (LT / L2)", L"Sağ tetik  (RT / R2)",
     L"Start / Options", L"Back / Share", L"Sol çubuğa bas  (L3)", L"Sağ çubuğa bas  (R3)",
@@ -427,13 +444,14 @@ constexpr const wchar_t* PHYSICAL_BUTTON_NAMES[pad::REMAP_COUNT] = {
 void pad_select(LauncherState& st, const pad::ButtonMap& m) {
     for (std::size_t i = 0; i < pad::REMAP_COUNT; ++i) {
         const int src = m[i];
-        // Combo entry 0 = "(atanmamış)", 1.. = physical buttons
+        // Combo entry 0 = "(not assigned)", 1.. = physical buttons
         SendMessageW(item(st, ID_PAD_COMBO0 + static_cast<int>(i)), CB_SETCURSEL,
                      src >= 0 && src < static_cast<int>(pad::REMAP_COUNT) ? src + 1 : 0, 0);
     }
 }
 
 void show_page(LauncherState& st, int page) {
+    st.page = page;
     for (int p = 0; p < PAGE_COUNT; ++p) {
         for (HWND c : st.pages[p]) ShowWindow(c, p == page ? SW_SHOWNA : SW_HIDE);
         SendMessageW(item(st, ID_NAV0 + p), BM_SETCHECK, p == page ? BST_CHECKED : BST_UNCHECKED, 0);
@@ -457,12 +475,16 @@ void build_controls(LauncherState& st) {
     GameSettings& s = *st.s;
     const DWORD tab = WS_TABSTOP;
 
-    HWND title = make(st, L"STATIC", L"Vagrant Story — Ayarlar", SS_LEFT, M, 12, WIN_W - 2 * M, 28, 0);
+    HWND title = make(st, L"STATIC", txt(L"Vagrant Story — Settings", L"Vagrant Story — Ayarlar"), SS_LEFT, M, 12, WIN_W - 2 * M - 300, 28, 0);
     SendMessageW(title, WM_SETFONT, reinterpret_cast<WPARAM>(st.title_font), TRUE);
+    // Language, on every page (in both languages, so it can be found whichever is shown)
+    make(st, L"STATIC", L"Language / Dil:", SS_RIGHT, WIN_W - M - 170 - 128, 17, 120, 20, 0);
+    add_combo(st, WIN_W - M - 170, 14, 170, ID_LANG_COMBO, {L"Automatic / Otomatik", L"English", L"Türkçe"},
+              clamp_int(s.language, 0, 2));
 
     // --- Page buttons (left) ---
     for (int p = 0; p < PAGE_COUNT; ++p) {
-        make(st, L"BUTTON", PAGE_NAMES[p], BS_AUTORADIOBUTTON | BS_PUSHLIKE | tab | (p == 0 ? WS_GROUP : 0),
+        make(st, L"BUTTON", page_name(p), BS_AUTORADIOBUTTON | BS_PUSHLIKE | tab | (p == 0 ? WS_GROUP : 0),
              M, BODY_Y + 8 + p * 40, NAV_W, 34, ID_NAV0 + p);
     }
 
@@ -471,7 +493,7 @@ void build_controls(LauncherState& st) {
     constexpr int CX = PAGE_X + 170, CW = 260;                  // Combo column
     const auto begin_page = [&](int p) {
         st.building_page = p;
-        make(st, L"BUTTON", PAGE_NAMES[p], BS_GROUPBOX | WS_GROUP, PAGE_X, BODY_Y, PAGE_W, BODY_H, 0);
+        make(st, L"BUTTON", page_name(p), BS_GROUPBOX | WS_GROUP, PAGE_X, BODY_Y, PAGE_W, BODY_H, 0);
         return BODY_Y + 28;
     };
     const auto label = [&](const wchar_t* t, int y) { make(st, L"STATIC", t, SS_LEFT, LX, y + 3, 150, 20, 0); };
@@ -479,37 +501,37 @@ void build_controls(LauncherState& st) {
     // --- Oyun: disc image, .sbi, memory card ---
     int y = begin_page(PAGE_GAME);
     constexpr int BW = 100, EW = IW - 2 * BW - 12, B1 = LX + EW + 6, B2 = B1 + BW + 6;
-    make(st, L"STATIC", L"Oyun klasörü / disk imajı:", SS_LEFT, LX, y, IW, 18, 0);
+    make(st, L"STATIC", txt(L"Game folder / disc image:", L"Oyun klasörü / disk imajı:"), SS_LEFT, LX, y, IW, 18, 0);
     make(st, L"EDIT", L"", ES_AUTOHSCROLL | ES_READONLY | WS_BORDER, LX, y + 20, EW, 24, ID_DISC_EDIT);
-    make(st, L"BUTTON", L"Klasör seç…", BS_PUSHBUTTON | tab, B1, y + 20, BW, 24, ID_DISC_FOLDER);
-    make(st, L"BUTTON", L"Dosya seç…", BS_PUSHBUTTON | tab, B2, y + 20, BW, 24, ID_DISC_FILE);
+    make(st, L"BUTTON", txt(L"Choose folder…", L"Klasör seç…"), BS_PUSHBUTTON | tab, B1, y + 20, BW, 24, ID_DISC_FOLDER);
+    make(st, L"BUTTON", txt(L"Choose file…", L"Dosya seç…"), BS_PUSHBUTTON | tab, B2, y + 20, BW, 24, ID_DISC_FILE);
     y += 56;
-    make(st, L"STATIC", L"Alt kanal dosyası (.sbi, yalnızca Avrupa sürümü):", SS_LEFT, LX, y, IW, 18, 0);
+    make(st, L"STATIC", txt(L"Subchannel file (.sbi, European release only):", L"Alt kanal dosyası (.sbi, yalnızca Avrupa sürümü):"), SS_LEFT, LX, y, IW, 18, 0);
     make(st, L"EDIT", L"", ES_AUTOHSCROLL | ES_READONLY | WS_BORDER, LX, y + 20, EW, 24, ID_SBI_EDIT);
-    make(st, L"BUTTON", L"Dosya seç…", BS_PUSHBUTTON | tab, B1, y + 20, BW, 24, ID_SBI_FILE);
-    make(st, L"BUTTON", L"Kaldır", BS_PUSHBUTTON | tab, B2, y + 20, BW, 24, ID_SBI_CLEAR);
+    make(st, L"BUTTON", txt(L"Choose file…", L"Dosya seç…"), BS_PUSHBUTTON | tab, B1, y + 20, BW, 24, ID_SBI_FILE);
+    make(st, L"BUTTON", txt(L"Remove", L"Kaldır"), BS_PUSHBUTTON | tab, B2, y + 20, BW, 24, ID_SBI_CLEAR);
     y += 56;
-    make(st, L"STATIC", L"Hafıza kartı 1 (kayıtlar bu dosyada tutulur):", SS_LEFT, LX, y, IW, 18, 0);
+    make(st, L"STATIC", txt(L"Memory card 1 (your saves are kept in this file):", L"Hafıza kartı 1 (kayıtlar bu dosyada tutulur):"), SS_LEFT, LX, y, IW, 18, 0);
     make(st, L"EDIT", L"", ES_AUTOHSCROLL | ES_READONLY | WS_BORDER, LX, y + 20, EW, 24, ID_CARD_EDIT);
-    make(st, L"BUTTON", L"Değiştir…", BS_PUSHBUTTON | tab, B1, y + 20, BW, 24, ID_CARD_CHANGE);
-    make(st, L"BUTTON", L"Klasörü aç", BS_PUSHBUTTON | tab, B2, y + 20, BW, 24, ID_CARD_OPEN);
+    make(st, L"BUTTON", txt(L"Change…", L"Değiştir…"), BS_PUSHBUTTON | tab, B1, y + 20, BW, 24, ID_CARD_CHANGE);
+    make(st, L"BUTTON", txt(L"Open folder", L"Klasörü aç"), BS_PUSHBUTTON | tab, B2, y + 20, BW, 24, ID_CARD_OPEN);
     y += 64;
     make(st, L"STATIC", L"", SS_LEFT, LX, y, IW, 40, ID_STATUS);
 
     // --- Grafik: how the 3D picture is drawn ---
     y = begin_page(PAGE_GRAPHICS);
-    label(L"İç çözünürlük:", y);
+    label(txt(L"Internal resolution:", L"İç çözünürlük:"), y);
     add_combo(st, CX, y, CW, ID_RES_COMBO,
-              {L"1×  orijinal (320 × 240)", L"2×  (640 × 480)", L"3×  (960 × 720)", L"4×  (1280 × 960)",
-               L"5×  (1600 × 1200) — 1080p ekranlar", L"6×  (1920 × 1440) — 1440p ekranlar",
-               L"7×  (2240 × 1680) — kenar yumuşatma", L"8×  (2560 × 1920) — kenar yumuşatma, güçlü ekran kartı"},
+              {txt(L"1×  original (320 × 240)", L"1×  orijinal (320 × 240)"), L"2×  (640 × 480)", L"3×  (960 × 720)", L"4×  (1280 × 960)",
+               txt(L"5×  (1600 × 1200) — 1080p screens", L"5×  (1600 × 1200) — 1080p ekranlar"), txt(L"6×  (1920 × 1440) — 1440p screens", L"6×  (1920 × 1440) — 1440p ekranlar"),
+               txt(L"7×  (2240 × 1680) — anti-aliasing", L"7×  (2240 × 1680) — kenar yumuşatma"), txt(L"8×  (2560 × 1920) — anti-aliasing, strong graphics card", L"8×  (2560 × 1920) — kenar yumuşatma, güçlü ekran kartı")},
               clamp_int(s.internal_scale, 1, 8) - 1);
     y += 34;
-    label(L"Çizim:", y);
-    add_combo(st, CX, y, CW, ID_RENDERER_COMBO, {L"Ekran kartı (önerilen)", L"İşlemci"}, clamp_int(s.renderer, 0, 1));
+    label(txt(L"Renderer:", L"Çizim:"), y);
+    add_combo(st, CX, y, CW, ID_RENDERER_COMBO, {txt(L"Graphics card (recommended)", L"Ekran kartı (önerilen)"), txt(L"Processor", L"İşlemci")}, clamp_int(s.renderer, 0, 1));
     y += 34;
-    label(L"Ekran kartı:", y);
-    HWND gpu = add_combo(st, CX, y, IW - (CX - LX), ID_GPU_COMBO, {L"Otomatik (en güçlü)"}, 0);
+    label(txt(L"Graphics card:", L"Ekran kartı:"), y);
+    HWND gpu = add_combo(st, CX, y, IW - (CX - LX), ID_GPU_COMBO, {txt(L"Automatic (most powerful)", L"Otomatik (en güçlü)")}, 0);
     st.gpus = list_graphics_adapters();
     int gpu_sel = 0;
     for (std::size_t i = 0; i < st.gpus.size(); ++i) {
@@ -518,71 +540,79 @@ void build_controls(LauncherState& st) {
     }
     SendMessageW(gpu, CB_SETCURSEL, gpu_sel, 0); // A card that is no longer there falls back to automatic
     y += 34;
-    label(L"Karakter kenar ışığı:", y);
-    add_combo(st, CX, y, CW, ID_RIM_COMBO, {L"Yumuşak", L"Keskin", L"Kapalı"}, clamp_int(s.rim_light, 0, 2));
+    label(txt(L"Character rim light:", L"Karakter kenar ışığı:"), y);
+    add_combo(st, CX, y, CW, ID_RIM_COMBO, {txt(L"Soft", L"Yumuşak"), txt(L"Sharp", L"Keskin"), txt(L"Off", L"Kapalı")}, clamp_int(s.rim_light, 0, 2));
     y += 34;
-    label(L"Köşe hassasiyeti:", y);
-    add_combo(st, CX, y, CW, ID_PGXP_COMBO, {L"Kapalı (orijinal titreme)", L"Titreme düzeltmesi", L"Titreme + perspektifli doku"},
+    label(txt(L"Vertex precision:", L"Köşe hassasiyeti:"), y);
+    add_combo(st, CX, y, CW, ID_PGXP_COMBO, {txt(L"Off (original wobble)", L"Kapalı (orijinal titreme)"), txt(L"Wobble fix", L"Titreme düzeltmesi"), txt(L"Wobble fix + perspective textures", L"Titreme + perspektifli doku")},
               clamp_int(s.pgxp, 0, 2));
     y += 34;
-    label(L"3D doku filtresi:", y);
-    add_combo(st, CX, y, CW, ID_TEXFILTER_CHECK, {L"Kapalı (keskin pikseller)", L"Yumuşak (bilinear)", L"Keskin yumuşatma"},
+    label(txt(L"3D texture filter:", L"3D doku filtresi:"), y);
+    add_combo(st, CX, y, CW, ID_TEXFILTER_CHECK, {txt(L"Off (sharp pixels)", L"Kapalı (keskin pikseller)"), txt(L"Smooth (bilinear)", L"Yumuşak (bilinear)"), txt(L"Sharp bilinear", L"Keskin yumuşatma")},
               clamp_int(s.texture_filter, 0, 2));
     y += 34;
-    make(st, L"STATIC", L"Kenar yumuşatma: iç çözünürlük pencereden büyükse görüntü ortalanarak küçültülür "
-                        L"(süper örnekleme). 1080p ekranda 7× ya da 8× seçin.",
+    make(st, L"STATIC", txt(L"Anti-aliasing: when the internal resolution is larger than the window, the picture is averaged down "
+                            L"(supersampling). On a 1080p screen choose 7× or 8×.",
+                            L"Kenar yumuşatma: iç çözünürlük pencereden büyükse görüntü ortalanarak küçültülür "
+                            L"(süper örnekleme). 1080p ekranda 7× ya da 8× seçin."),
          SS_LEFT, LX, y, IW, 36, 0);
     y += 44;
-    add_check(st, L"Ara kare üretimi: 25 yerine 50 fps görüntü (ekran kartı çizimi, 2× ve üstü; deneysel)", LX, y, IW, 20,
+    add_check(st, txt(L"Frame interpolation: 50 instead of 25 fps (graphics card renderer, 2× and up; experimental)", L"Ara kare üretimi: 25 yerine 50 fps görüntü (ekran kartı çizimi, 2× ve üstü; deneysel)"), LX, y, IW, 20,
               ID_INTERP_CHECK, s.frame_interp);
 
     // --- Ekran: window, aspect ratio, filter ---
     y = begin_page(PAGE_DISPLAY);
-    label(L"Ekran modu:", y);
-    add_combo(st, CX, y, CW, ID_MODE_COMBO, {L"Pencere", L"Tam ekran"}, s.fullscreen ? 1 : 0);
+    label(txt(L"Display mode:", L"Ekran modu:"), y);
+    add_combo(st, CX, y, CW, ID_MODE_COMBO, {txt(L"Window", L"Pencere"), txt(L"Fullscreen", L"Tam ekran")}, s.fullscreen ? 1 : 0);
     y += 34;
-    label(L"Görüntü oranı:", y);
-    add_combo(st, CX, y, CW, ID_ASPECT_COMBO, {L"4:3  (orijinal)", L"10:7", L"3:2", L"16:10", L"16:9", L"Pencereyi / ekranı doldur"},
+    label(txt(L"Aspect ratio:", L"Görüntü oranı:"), y);
+    add_combo(st, CX, y, CW, ID_ASPECT_COMBO, {txt(L"4:3  (original)", L"4:3  (orijinal)"), L"10:7", L"3:2", L"16:10", L"16:9", txt(L"Fill the window / screen", L"Pencereyi / ekranı doldur")},
               clamp_int(s.aspect, 0, ASPECT_COUNT - 1));
     y += 34;
-    label(L"Pencere boyutu:", y);
+    label(txt(L"Window size:", L"Pencere boyutu:"), y);
     make(st, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | tab | WS_VSCROLL, CX, y, CW, 240, ID_SCALE_COMBO);
     fill_window_sizes(st, s.window_height);
     y += 34;
-    label(L"Görüntü filtresi:", y);
-    add_combo(st, CX, y, CW, ID_FILTER_COMBO, {L"Keskin piksel", L"Yumuşak (bilinear)", L"CRT tarama çizgileri"},
+    label(txt(L"Picture filter:", L"Görüntü filtresi:"), y);
+    add_combo(st, CX, y, CW, ID_FILTER_COMBO, {txt(L"Sharp pixels", L"Keskin piksel"), txt(L"Smooth (bilinear)", L"Yumuşak (bilinear)"), txt(L"CRT scanlines", L"CRT tarama çizgileri")},
               clamp_int(s.filter, 0, 2));
     y += 40;
-    add_check(st, L"Tam sayı ölçekleme (yalnızca 1× iç çözünürlükte; kenarlarda boşluk bırakır)", LX, y, IW, 20,
+    add_check(st, txt(L"Integer scaling (1× internal resolution only; leaves borders)", L"Tam sayı ölçekleme (yalnızca 1× iç çözünürlükte; kenarlarda boşluk bırakır)"), LX, y, IW, 20,
               ID_INTEGER_CHECK, s.integer_scale);
     y += 28;
-    add_check(st, L"3D sahneyi orana göre genişlet (kapalıysa 4:3 görüntü yatayda esnetilir;\n"
-                  L"açıkken yazılar ve göstergeler esnemez)",
+    add_check(st, txt(L"Widen the 3D view to the aspect ratio (when off, the 4:3 picture is stretched;\n"
+                      L"when on, texts and gauges keep their shape)",
+                      L"3D sahneyi orana göre genişlet (kapalıysa 4:3 görüntü yatayda esnetilir;\n"
+                      L"açıkken yazılar ve göstergeler esnemez)"),
               LX, y, IW, 36, ID_WIDE_CHECK, s.widescreen, BS_MULTILINE);
     y += 46;
-    add_check(st, L"Avrupa (PAL) diskini 60 Hz'de çalıştır: oyun ABD sürümü hızında akar\n"
-                  L"(PAL sürümü normalde ~%17 yavaştır; müzik temposu değişmez)",
+    add_check(st, txt(L"Run the European (PAL) disc at 60 Hz: the game runs at US speed\n"
+                      L"(the PAL release is normally ~17% slower; music tempo does not change)",
+                      L"Avrupa (PAL) diskini 60 Hz'de çalıştır: oyun ABD sürümü hızında akar\n"
+                      L"(PAL sürümü normalde ~%17 yavaştır; müzik temposu değişmez)"),
               LX, y, IW, 36, ID_PAL60_CHECK, s.pal60, BS_MULTILINE);
 
     // --- Ses ---
     y = begin_page(PAGE_SOUND);
-    add_check(st, L"Sesi kapat", LX, y + 2, 140, 20, ID_MUTE_CHECK, s.muted);
+    add_check(st, txt(L"Mute", L"Sesi kapat"), LX, y + 2, 140, 20, ID_MUTE_CHECK, s.muted);
     y += 36;
-    label(L"Ses seviyesi:", y);
+    label(txt(L"Volume:", L"Ses seviyesi:"), y);
     HWND vol = make(st, TRACKBAR_CLASSW, L"", TBS_HORZ | TBS_NOTICKS | tab, CX - 6, y, CW + 12, 26, ID_VOLUME_SLIDER);
     SendMessageW(vol, TBM_SETRANGE, TRUE, MAKELPARAM(0, 100));
     SendMessageW(vol, TBM_SETPAGESIZE, 0, 10);
     SendMessageW(vol, TBM_SETPOS, TRUE, clamp_int(s.volume, 0, 100));
     make(st, L"STATIC", L"", SS_LEFT, CX + CW + 14, y + 3, 50, 20, ID_VOLUME_LABEL);
     y += 44;
-    add_check(st, L"Yankı (PS1 reverb birimi: mekân ve zindan yankısı)", LX, y, IW, 20, ID_REVERB_CHECK, s.reverb);
+    add_check(st, txt(L"Reverb (the PS1 reverb unit: room and dungeon echo)", L"Yankı (PS1 reverb birimi: mekân ve zindan yankısı)"), LX, y, IW, 20, ID_REVERB_CHECK, s.reverb);
     y += 28;
-    add_check(st, L"Kübik ses ara değerlemesi (daha temiz tizler; kapalıyken doğrusal)", LX, y, IW, 20, ID_CUBIC_CHECK, s.audio_cubic);
+    add_check(st, txt(L"Cubic audio interpolation (cleaner highs; linear when off)", L"Kübik ses ara değerlemesi (daha temiz tizler; kapalıyken doğrusal)"), LX, y, IW, 20, ID_CUBIC_CHECK, s.audio_cubic);
 
     // --- Kontroller: which controller button acts as each PS1 button ---
     y = begin_page(PAGE_CONTROLS);
-    make(st, L"STATIC", L"Her PS1 tuşu için kontrolcünüzde hangi tuşun kullanılacağını seçin. Yön tuşları ve sol "
-                        L"çubuk her zaman yön olarak çalışır; klavye tuşları değişmez.",
+    make(st, L"STATIC", txt(L"Choose which button on your controller acts as each PS1 button. The d-pad and the left "
+                            L"stick always move; keyboard keys do not change.",
+                            L"Her PS1 tuşu için kontrolcünüzde hangi tuşun kullanılacağını seçin. Yön tuşları ve sol "
+                            L"çubuk her zaman yön olarak çalışır; klavye tuşları değişmez."),
          SS_LEFT, LX, y, IW, 36, 0);
     y += 46;
     constexpr int COL_W = 268, PAD_LW = 82, PAD_CW = COL_W - PAD_LW - 10;
@@ -590,92 +620,104 @@ void build_controls(LauncherState& st) {
     for (std::size_t i = 0; i < pad::REMAP_COUNT; ++i) {
         const int col = static_cast<int>(i) / PAD_ROWS, row = static_cast<int>(i) % PAD_ROWS;
         const int x = LX + col * COL_W, yy = y + row * 32;
-        make(st, L"STATIC", PS1_BUTTON_NAMES[i], SS_LEFT, x, yy + 3, PAD_LW, 20, 0);
+        make(st, L"STATIC", txt(PS1_BUTTON_NAMES_EN[i], PS1_BUTTON_NAMES_TR[i]), SS_LEFT, x, yy + 3, PAD_LW, 20, 0);
         HWND c = make(st, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | tab | WS_VSCROLL, x + PAD_LW, yy, PAD_CW, 300,
                       ID_PAD_COMBO0 + static_cast<int>(i));
-        SendMessageW(c, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"(atanmamış)"));
-        for (const wchar_t* name : PHYSICAL_BUTTON_NAMES) SendMessageW(c, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(name));
+        SendMessageW(c, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(txt(L"(not assigned)", L"(atanmamış)")));
+        for (std::size_t b = 0; b < pad::REMAP_COUNT; ++b) {
+            SendMessageW(c, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(txt(PHYSICAL_BUTTON_NAMES_EN[b], PHYSICAL_BUTTON_NAMES_TR[b])));
+        }
     }
     y += PAD_ROWS * 32 + 8;
-    make(st, L"BUTTON", L"Varsayılana döndür", BS_PUSHBUTTON | tab, LX, y, 150, 28, ID_PAD_DEFAULTS);
-    add_check(st, L"Titreşim (Xbox / XInput uyumlu kontrolcüler)", LX + 180, y + 4, IW - 180, 20, ID_RUMBLE_CHECK, s.rumble);
+    make(st, L"BUTTON", txt(L"Reset to defaults", L"Varsayılana döndür"), BS_PUSHBUTTON | tab, LX, y, 150, 28, ID_PAD_DEFAULTS);
+    add_check(st, txt(L"Vibration (Xbox / XInput compatible controllers)", L"Titreşim (Xbox / XInput uyumlu kontrolcüler)"), LX + 180, y + 4, IW - 180, 20, ID_RUMBLE_CHECK, s.rumble);
     y += 36;
-    add_check(st, L"Sağ çubukla serbest kamera (klavyede J / L döndür, I / K eğ)", LX, y, IW, 20, ID_FREECAM_CHECK, s.free_camera);
+    add_check(st, txt(L"Free camera with the right stick (keyboard: J / L turn, I / K tilt)", L"Sağ çubukla serbest kamera (klavyede J / L döndür, I / K eğ)"), LX, y, IW, 20, ID_FREECAM_CHECK, s.free_camera);
     pad_select(st, s.pad_map);
 
-    // --- Gelişmiş: emulation tweaks ---
+    // --- Advanced: emulation tweaks ---
     y = begin_page(PAGE_ADVANCED);
-    label(L"İşlemci hızı:", y);
+    label(txt(L"CPU speed:", L"İşlemci hızı:"), y);
     {
         int sel = 0;
         for (int i = 0; i < 4; ++i) if (s.cpu_overclock >= OVERCLOCK_VALUES[i]) sel = i;
-        add_combo(st, CX, y, CW, ID_OVERCLOCK_COMBO, {L"Orijinal (%100)", L"%150", L"%200", L"%300"}, sel);
+        add_combo(st, CX, y, CW, ID_OVERCLOCK_COMBO, {txt(L"Original (100%)", L"Orijinal (%100)"), txt(L"150%", L"%150"), txt(L"200%", L"%200"), txt(L"300%", L"%300")}, sel);
     }
     y += 30;
-    make(st, L"STATIC", L"Emüle edilen PS1 işlemcisini hızlandırır: oyunun kalabalık sahnelerdeki kendi "
-                        L"yavaşlamaları azalır. Oyun hızlanmaz; bilgisayarın işlemcisi daha çok çalışır.",
+    make(st, L"STATIC", txt(L"Speeds up the emulated PS1 processor: the game's own slowdowns in busy scenes "
+                            L"shrink. The game does not run faster; your computer's processor works harder.",
+                            L"Emüle edilen PS1 işlemcisini hızlandırır: oyunun kalabalık sahnelerdeki kendi "
+                            L"yavaşlamaları azalır. Oyun hızlanmaz; bilgisayarın işlemcisi daha çok çalışır."),
          SS_LEFT, LX, y, IW, 36, 0);
 
     y += 46;
-    make(st, L"STATIC", L"Anlık kayıt (oyunun kendi kayıt noktalarından bağımsız):  F5 kaydet,  F7 yükle,  "
-                        L"F6 kayıt yuvasını değiştir (1–5).",
+    make(st, L"STATIC", txt(L"Save states (separate from the game's own save points):  F5 save,  F7 load,  "
+                            L"F6 change slot (1–5).",
+                            L"Anlık kayıt (oyunun kendi kayıt noktalarından bağımsız):  F5 kaydet,  F7 yükle,  "
+                            L"F6 kayıt yuvasını değiştir (1–5)."),
          SS_LEFT, LX, y, IW, 36, 0);
     y += 42;
-    add_check(st, L"Çıkarken durumu kaydet, açılışta kaldığım yerden devam et", LX, y, IW, 20, ID_AUTOSAVE_CHECK, s.autosave);
+    add_check(st, txt(L"Save the state on exit and continue where I left off", L"Çıkarken durumu kaydet, açılışta kaldığım yerden devam et"), LX, y, IW, 20, ID_AUTOSAVE_CHECK, s.autosave);
     y += 28;
-    add_check(st, L"Geri sarma: F8 basılı tutulunca son ~30 saniye geri sarılır (~110 MB bellek)", LX, y, IW, 20,
+    add_check(st, txt(L"Rewind: hold F8 to rewind the last ~30 seconds (~110 MB of memory)", L"Geri sarma: F8 basılı tutulunca son ~30 saniye geri sarılır (~110 MB bellek)"), LX, y, IW, 20,
               ID_REWIND_CHECK, s.rewind);
 
     y += 32;
-    add_check(st, L"Hile kodlarını uygula (GameShark biçimi)", LX, y + 4, 300, 20, ID_CHEATS_CHECK, s.cheats);
-    make(st, L"BUTTON", L"Hile dosyasını aç…", BS_PUSHBUTTON | tab, LX + IW - 160, y, 160, 28, ID_CHEATS_OPEN);
+    add_check(st, txt(L"Apply cheat codes (GameShark format)", L"Hile kodlarını uygula (GameShark biçimi)"), LX, y + 4, 300, 20, ID_CHEATS_CHECK, s.cheats);
+    make(st, L"BUTTON", txt(L"Open cheat file…", L"Hile dosyasını aç…"), BS_PUSHBUTTON | tab, LX + IW - 160, y, 160, 28, ID_CHEATS_OPEN);
 
     y += 34;
-    add_check(st, L"Doku paketi kullan (\"dokular\" klasörü; 2× ve üstü iç çözünürlükte)", LX, y + 4, IW - 170, 20,
+    add_check(st, txt(L"Use texture packs (\"dokular\" folder; 2× internal resolution and up)", L"Doku paketi kullan (\"dokular\" klasörü; 2× ve üstü iç çözünürlükte)"), LX, y + 4, IW - 170, 20,
               ID_TEXPACK_CHECK, s.texture_pack);
-    make(st, L"BUTTON", L"Doku klasörünü aç…", BS_PUSHBUTTON | tab, LX + IW - 160, y, 160, 28, ID_TEXPACK_OPEN);
+    make(st, L"BUTTON", txt(L"Open texture folder…", L"Doku klasörünü aç…"), BS_PUSHBUTTON | tab, LX + IW - 160, y, 160, 28, ID_TEXPACK_OPEN);
     y += 32;
-    add_check(st, L"Oyunun dokularını dök (paket hazırlamak için, dokular\\_dokum klasörüne)", LX, y, IW, 20,
+    add_check(st, txt(L"Dump the game's textures (to make packs, into dokular\\_dokum)", L"Oyunun dokularını dök (paket hazırlamak için, dokular\\_dokum klasörüne)"), LX, y, IW, 20,
               ID_TEXDUMP_CHECK, s.texture_dump);
     y += 32;
-    label(L"Gecikme azaltma:", y);
+    label(txt(L"Run-ahead:", L"Gecikme azaltma:"), y);
     add_combo(st, CX, y, CW, ID_RUNAHEAD_COMBO,
-              {L"Kapalı", L"1 kare (20 ms, önerilen)", L"2 kare (40 ms, güçlü işlemci)", L"3 kare (60 ms, çok güçlü işlemci)"},
+              {txt(L"Off", L"Kapalı"), txt(L"1 frame (20 ms, recommended)", L"1 kare (20 ms, önerilen)"), txt(L"2 frames (40 ms, strong CPU)", L"2 kare (40 ms, güçlü işlemci)"), txt(L"3 frames (60 ms, very strong CPU)", L"3 kare (60 ms, çok güçlü işlemci)")},
               clamp_int(s.runahead, 0, 3));
     y += 28;
-    make(st, L"STATIC", L"Tuşa basışın sonucu bu kadar erken görünür (emülasyon 2–4 kat çalışır; ara kare üretimi kapanır).",
+    make(st, L"STATIC", txt(L"Presses show up this much sooner (2–4× the emulation work; frame interpolation turns off).", L"Tuşa basışın sonucu bu kadar erken görünür (emülasyon 2–4 kat çalışır; ara kare üretimi kapanır)."),
          SS_LEFT, LX, y, IW, 20, 0);
 
-    // --- Başarımlar: RetroAchievements ---
+    // --- Achievements: RetroAchievements ---
     y = begin_page(PAGE_ACHIEVEMENTS);
-    add_check(st, L"RetroAchievements başarımlarını etkinleştir (softcore)", LX, y, IW, 20, ID_RA_CHECK, s.ra_enabled);
+    add_check(st, txt(L"Enable RetroAchievements (softcore)", L"RetroAchievements başarımlarını etkinleştir (softcore)"), LX, y, IW, 20, ID_RA_CHECK, s.ra_enabled);
     y += 36;
-    label(L"Kullanıcı adı:", y);
+    label(txt(L"User name:", L"Kullanıcı adı:"), y);
     make(st, L"EDIT", widen(s.ra_user).c_str(), ES_AUTOHSCROLL | WS_BORDER | tab, CX, y, CW, 24, ID_RA_USER);
     y += 32;
-    label(L"Şifre:", y);
+    label(txt(L"Password:", L"Şifre:"), y);
     make(st, L"EDIT", L"", ES_AUTOHSCROLL | ES_PASSWORD | WS_BORDER | tab, CX, y, CW, 24, ID_RA_PASS);
-    make(st, L"BUTTON", L"Giriş yap", BS_PUSHBUTTON | tab, CX + CW + 12, y - 2, 120, 28, ID_RA_LOGIN);
+    make(st, L"BUTTON", txt(L"Sign in", L"Giriş yap"), BS_PUSHBUTTON | tab, CX + CW + 12, y - 2, 120, 28, ID_RA_LOGIN);
     y += 40;
     make(st, L"STATIC", L"", SS_LEFT, LX, y + 4, CX + CW - LX, 20, ID_RA_STATUS);
-    make(st, L"BUTTON", L"Çıkış yap", BS_PUSHBUTTON | tab, CX + CW + 12, y, 120, 28, ID_RA_LOGOUT);
+    make(st, L"BUTTON", txt(L"Sign out", L"Çıkış yap"), BS_PUSHBUTTON | tab, CX + CW + 12, y, 120, 28, ID_RA_LOGOUT);
     y += 44;
-    make(st, L"STATIC", L"Başarım seti yalnızca ABD sürümünde (SLUS-01040) var; Avrupa diskinde başarım yüklenmez.\n\n"
-                        L"Yalnızca softcore: anlık kayıt, geri sarma ve hileler kullanılabilir (hardcore için "
-                        L"RetroAchievements onayı gerekir).\n\n"
-                        L"Şifre saklanmaz: giriş yapınca sunucunun verdiği oturum anahtarı VagrantStory.ini'ye yazılır. "
-                        L"Açılan başarımlar pencere başlığında gösterilir.",
+    make(st, L"STATIC", txt(L"The achievement set exists for the US release (SLUS-01040) only; no achievements load "
+                            L"for the European disc.\n\n"
+                            L"Softcore only: save states, rewind and cheats can be used (hardcore needs approval "
+                            L"from RetroAchievements).\n\n"
+                            L"The password is not stored: after signing in, the session token from the server is "
+                            L"written to VagrantStory.ini. Unlocked achievements are shown in the window title.",
+                            L"Başarım seti yalnızca ABD sürümünde (SLUS-01040) var; Avrupa diskinde başarım yüklenmez.\n\n"
+                            L"Yalnızca softcore: anlık kayıt, geri sarma ve hileler kullanılabilir (hardcore için "
+                            L"RetroAchievements onayı gerekir).\n\n"
+                            L"Şifre saklanmaz: giriş yapınca sunucunun verdiği oturum anahtarı VagrantStory.ini'ye yazılır. "
+                            L"Açılan başarımlar pencere başlığında gösterilir."),
          SS_LEFT, LX, y, IW, 130, 0);
     update_ra_status(st);
 
     // --- Footer (always visible) ---
     st.building_page = -1;
     const int fy = BODY_Y + BODY_H + 14;
-    HWND show = add_check(st, L"Bu pencereyi her açılışta göster  (kapalıyken oyunu Shift ile başlatın)", M, fy + 5,
+    HWND show = add_check(st, txt(L"Show this window on every start  (when off, hold Shift while starting)", L"Bu pencereyi her açılışta göster  (kapalıyken oyunu Shift ile başlatın)"), M, fy + 5,
                           WIN_W - 2 * M - 240, 20, ID_SHOW_CHECK, s.show_launcher);
     SendMessageW(show, WM_SETFONT, reinterpret_cast<WPARAM>(st.font), TRUE);
-    make(st, L"BUTTON", L"Çıkış", BS_PUSHBUTTON | tab | WS_GROUP, WIN_W - M - 120 - 8 - 100, fy, 100, 30, IDCANCEL);
-    make(st, L"BUTTON", L"Oyna", BS_DEFPUSHBUTTON | tab, WIN_W - M - 120, fy, 120, 30, IDOK);
+    make(st, L"BUTTON", txt(L"Quit", L"Çıkış"), BS_PUSHBUTTON | tab | WS_GROUP, WIN_W - M - 120 - 8 - 100, fy, 100, 30, IDCANCEL);
+    make(st, L"BUTTON", txt(L"Play", L"Oyna"), BS_DEFPUSHBUTTON | tab, WIN_W - M - 120, fy, 120, 30, IDOK);
 
     update_status(st);
     update_volume_label(st);
@@ -685,6 +727,7 @@ void build_controls(LauncherState& st) {
 
 void read_controls(LauncherState& st) {
     GameSettings& s = *st.s;
+    s.language      = clamp_int(static_cast<int>(SendMessageW(item(st, ID_LANG_COMBO), CB_GETCURSEL, 0, 0)), 0, 2);
     s.fullscreen    = SendMessageW(item(st, ID_MODE_COMBO), CB_GETCURSEL, 0, 0) == 1;
     s.window_height = selected_window_height(st);
     s.aspect        = clamp_int(static_cast<int>(SendMessageW(item(st, ID_ASPECT_COMBO), CB_GETCURSEL, 0, 0)), 0, ASPECT_COUNT - 1);
@@ -727,6 +770,22 @@ void read_controls(LauncherState& st) {
     }
 }
 
+constexpr UINT WM_APP_REBUILD = WM_APP + 1;
+
+// Another language: the window is built again in it, with the values chosen so far and on the same page
+void rebuild_in_language(LauncherState& st) {
+    read_controls(st);
+    set_language(language_from_setting(st.s->language));
+    const int page = st.page;
+    while (HWND c = GetWindow(st.hwnd, GW_CHILD)) DestroyWindow(c);
+    for (auto& p : st.pages) p.clear();
+    st.building_page = -1;
+    build_controls(st);
+    show_page(st, page);
+    SetWindowTextW(st.hwnd, txt(L"Vagrant Story — Settings", L"Vagrant Story — Ayarlar"));
+    SetFocus(item(st, ID_LANG_COMBO));
+}
+
 LRESULT CALLBACK LauncherWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     auto* st = reinterpret_cast<LauncherState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
     switch (msg) {
@@ -764,12 +823,12 @@ LRESULT CALLBACK LauncherWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
             }
             switch (id) {
                 case ID_DISC_FOLDER: {
-                    const auto folder = pick_folder(hwnd, L"Vagrant Story disk imajının bulunduğu klasörü seçin");
+                    const auto folder = pick_folder(hwnd, txt(L"Choose the folder that holds the Vagrant Story disc image", L"Vagrant Story disk imajının bulunduğu klasörü seçin"));
                     if (!folder.empty()) {
                         std::filesystem::path disc, sbi;
                         scan_game_folder(folder, disc, sbi);
                         if (disc.empty()) {
-                            MessageBoxW(hwnd, L"Bu klasörde .cue, .bin ya da .iso dosyası bulunamadı.",
+                            MessageBoxW(hwnd, txt(L"No .cue, .bin or .iso file found in this folder.", L"Bu klasörde .cue, .bin ya da .iso dosyası bulunamadı."),
                                         L"Vagrant Story", MB_OK | MB_ICONWARNING);
                         } else {
                             s.disc = disc;
@@ -780,8 +839,8 @@ LRESULT CALLBACK LauncherWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
                     return 0;
                 }
                 case ID_DISC_FILE: {
-                    const auto f = pick_file(hwnd, L"Vagrant Story disk imajını seçin",
-                                             L"PS1 disk imajı (*.cue;*.bin;*.iso)\0*.cue;*.bin;*.iso\0Tüm dosyalar (*.*)\0*.*\0",
+                    const auto f = pick_file(hwnd, txt(L"Choose the Vagrant Story disc image", L"Vagrant Story disk imajını seçin"),
+                                             txt(L"PS1 disc image (*.cue;*.bin;*.iso)\0*.cue;*.bin;*.iso\0All files (*.*)\0*.*\0", L"PS1 disk imajı (*.cue;*.bin;*.iso)\0*.cue;*.bin;*.iso\0Tüm dosyalar (*.*)\0*.*\0"),
                                              s.disc);
                     if (!f.empty()) {
                         s.disc = f;
@@ -795,8 +854,8 @@ LRESULT CALLBACK LauncherWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
                     return 0;
                 }
                 case ID_SBI_FILE: {
-                    const auto f = pick_file(hwnd, L"Diskin .sbi alt kanal dosyasını seçin",
-                                             L"Alt kanal verisi (*.sbi)\0*.sbi\0Tüm dosyalar (*.*)\0*.*\0",
+                    const auto f = pick_file(hwnd, txt(L"Choose the disc's .sbi subchannel file", L"Diskin .sbi alt kanal dosyasını seçin"),
+                                             txt(L"Subchannel data (*.sbi)\0*.sbi\0All files (*.*)\0*.*\0", L"Alt kanal verisi (*.sbi)\0*.sbi\0Tüm dosyalar (*.*)\0*.*\0"),
                                              s.sbi.empty() ? s.disc : s.sbi);
                     if (!f.empty()) {
                         s.sbi = f;
@@ -818,12 +877,12 @@ LRESULT CALLBACK LauncherWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
                     OPENFILENAMEW ofn{};
                     ofn.lStructSize     = sizeof(ofn);
                     ofn.hwndOwner       = hwnd;
-                    ofn.lpstrFilter     = L"Hafıza kartı (*.mcr;*.mcd;*.mc;*.srm)\0*.mcr;*.mcd;*.mc;*.srm\0Tüm dosyalar (*.*)\0*.*\0";
+                    ofn.lpstrFilter     = txt(L"Memory card (*.mcr;*.mcd;*.mc;*.srm)\0*.mcr;*.mcd;*.mc;*.srm\0All files (*.*)\0*.*\0", L"Hafıza kartı (*.mcr;*.mcd;*.mc;*.srm)\0*.mcr;*.mcd;*.mc;*.srm\0Tüm dosyalar (*.*)\0*.*\0");
                     ofn.lpstrFile       = buf.data();
                     ofn.nMaxFile        = static_cast<DWORD>(buf.size());
                     ofn.lpstrInitialDir = dir.c_str();
                     ofn.lpstrDefExt     = L"mcr";
-                    ofn.lpstrTitle      = L"Hafıza kartı dosyasını seçin ya da yeni bir ad verin";
+                    ofn.lpstrTitle      = txt(L"Choose a memory card file or type a new name", L"Hafıza kartı dosyasını seçin ya da yeni bir ad verin");
                     ofn.Flags           = OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR | OFN_EXPLORER;
                     if (GetSaveFileNameW(&ofn)) {
                         buf.resize(wcslen(buf.c_str()));
@@ -852,10 +911,10 @@ LRESULT CALLBACK LauncherWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
                     const std::string user = window_text_utf8(item(*st, ID_RA_USER));
                     std::string pass = window_text_utf8(item(*st, ID_RA_PASS));
                     if (user.empty() || pass.empty()) {
-                        update_ra_status(*st, L"Kullanıcı adı ve şifre girin");
+                        update_ra_status(*st, txt(L"Enter your user name and password", L"Kullanıcı adı ve şifre girin"));
                         return 0;
                     }
-                    update_ra_status(*st, L"Giriş yapılıyor…");
+                    update_ra_status(*st, txt(L"Signing in…", L"Giriş yapılıyor…"));
                     UpdateWindow(item(*st, ID_RA_STATUS));
                     HCURSOR old = SetCursor(LoadCursor(nullptr, IDC_WAIT));
                     std::string token, display, error;
@@ -868,9 +927,9 @@ LRESULT CALLBACK LauncherWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
                         s.ra_token = token;
                         s.ra_enabled = true;
                         SendMessageW(item(*st, ID_RA_CHECK), BM_SETCHECK, BST_CHECKED, 0);
-                        update_ra_status(*st, L"✓ Giriş yapıldı: " + widen(display));
+                        update_ra_status(*st, txt(L"✓ Signed in: ", L"✓ Giriş yapıldı: ") + widen(display));
                     } else {
-                        update_ra_status(*st, L"⚠ Giriş başarısız: " + widen(error));
+                        update_ra_status(*st, txt(L"⚠ Sign-in failed: ", L"⚠ Giriş başarısız: ") + widen(error));
                     }
                     return 0;
                 }
@@ -890,7 +949,20 @@ LRESULT CALLBACK LauncherWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
                     std::error_code ec;
                     if (!std::filesystem::exists(path, ec)) {
                         std::ofstream out(path, std::ios::binary);
-                        out << "\xEF\xBB\xBF"
+                        out << "\xEF\xBB\xBF";
+                        out << txt("# Vagrant Story cheat codes (GameShark / Action Replay format)\r\n"
+                               "#\r\n"
+                               "# Codes are specific to the game's RELEASE: use codes written for your disc\r\n"
+                               "# (Europe: SLES-02754, US: SLUS-01040, Japan: SLPS-02377).\r\n"
+                               "#\r\n"
+                               "# [Cheat name]          -> starts a cheat (on)\r\n"
+                               "# [Cheat name] off      -> a cheat that is off\r\n"
+                               "# 80012345 03E7         -> code lines (this line is only an example)\r\n"
+                               "#\r\n"
+                               "# Supported code types: 80 (16-bit write), 30 (8-bit write),\r\n"
+                               "# D0-D3 and E0-E3 (condition: the next line runs only when it holds).\r\n"
+                               "# Changes take effect the next time the game starts.\r\n"
+                               "\r\n",
                                "# Vagrant Story hile kodlari (GameShark / Action Replay bicimi)\r\n"
                                "#\r\n"
                                "# Kodlar oyunun SURUMUNE ozeldir: diskinizin surumu icin yazilmis kodlari kullanin\r\n"
@@ -903,11 +975,15 @@ LRESULT CALLBACK LauncherWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
                                "# Desteklenen kod turleri: 80 (16 bit yaz), 30 (8 bit yaz),\r\n"
                                "# D0-D3 ve E0-E3 (kosul: sonraki satir yalnizca kosul saglaninca calisir).\r\n"
                                "# Degisiklikler oyunun bir sonraki acilisinda gecerli olur.\r\n"
-                               "\r\n";
+                               "\r\n");
                     }
                     ShellExecuteW(hwnd, L"open", L"notepad.exe", (L"\"" + path.wstring() + L"\"").c_str(), nullptr, SW_SHOWNORMAL);
                     return 0;
                 }
+                case ID_LANG_COMBO:
+                    // Rebuilt after this notification returns (the combo sending it is destroyed too)
+                    if (HIWORD(wparam) == CBN_SELCHANGE) PostMessageW(hwnd, WM_APP_REBUILD, 0, 0);
+                    return 0;
                 case ID_PAD_DEFAULTS:
                     pad_select(*st, pad::default_button_map());
                     return 0;
@@ -927,6 +1003,9 @@ LRESULT CALLBACK LauncherWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
             }
             break;
         }
+        case WM_APP_REBUILD:
+            if (st) rebuild_in_language(*st);
+            return 0;
         case WM_CLOSE:
             DestroyWindow(hwnd);
             return 0;
@@ -1033,7 +1112,7 @@ bool run_window(GameSettings& s, const std::filesystem::path* dump_dir) {
     const int ww = r.right - r.left, wh = r.bottom - r.top;
     int sx = (GetSystemMetrics(SM_CXSCREEN) - ww) / 2, sy = (GetSystemMetrics(SM_CYSCREEN) - wh) / 2;
     if (dump_dir) { sx = -32000; sy = -32000; } // Off-screen: never seen
-    HWND hwnd = CreateWindowExW(ex, wc.lpszClassName, L"Vagrant Story — Ayarlar", style,
+    HWND hwnd = CreateWindowExW(ex, wc.lpszClassName, txt(L"Vagrant Story — Settings", L"Vagrant Story — Ayarlar"), style,
                                 sx, sy, ww, wh, nullptr, nullptr, wc.hInstance, &st);
     MSG msg{};
     if (dump_dir) {

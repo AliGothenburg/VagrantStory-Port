@@ -1,10 +1,11 @@
-﻿// SDL3 host: Linux / Steam Deck and Android (also builds on Windows, for testing).
+// SDL3 host: Linux / Steam Deck and Android (also builds on Windows, for testing).
 // Window, sound, controllers, touch buttons and an in-game menu through SDL3; the picture is
 // drawn by the processor (software upscaled picture) and shown with SDL's renderer (OpenGL /
 // Vulkan / GLES underneath). Settings are the same VagrantStory.ini as on Windows.
 #include "vsport/cdrom_iso.hpp"
 #include "vsport/cheats.hpp"
 #include "vsport/free_camera.hpp"
+#include "vsport/i18n.hpp"
 #include "vsport/pad_mapping.hpp"
 #include "vsport/psx_exe.hpp"
 #include "vsport/runtime.hpp"
@@ -44,7 +45,7 @@ namespace fs = std::filesystem;
 
 namespace {
 
-constexpr const char* VERSION = "0.3.2";
+constexpr const char* VERSION = "0.3.3";
 
 // ---------------------------------------------------------------------------------------------
 // Log: VagrantStory.log in the data folder, plus SDL_Log (console / Android logcat)
@@ -402,13 +403,13 @@ struct Gamepads {
         if (SDL_Gamepad* g = SDL_OpenGamepad(id)) {
             pads.push_back(g);
             const char* name = SDL_GetGamepadName(g);
-            host_log("Kontrolcu takildi: %s", name ? name : "?");
+            host_log("Controller connected: %s", name ? name : "?");
         }
     }
     void remove(SDL_JoystickID id) {
         for (auto it = pads.begin(); it != pads.end(); ++it) {
             if (SDL_GetGamepadID(*it) == id) {
-                host_log("Kontrolcu cikarildi");
+                host_log("Controller removed");
                 SDL_CloseGamepad(*it);
                 pads.erase(it);
                 return;
@@ -647,7 +648,7 @@ struct Importer {
             std::vector<u8> chunk(4u << 20);
             for (const std::string& u : list) {
                 SDL_IOStream* io = SDL_IOFromFile(u.c_str(), "rb");
-                if (!io) { error = std::string("Dosya acilamadi: ") + SDL_GetError(); continue; }
+                if (!io) { error = std::string(txt("Could not open the file: ", "Dosya acilamadi: ")) + SDL_GetError(); continue; }
                 const Sint64 size = SDL_GetIOSize(io);
                 char head[4] = {};
                 const std::size_t hn = SDL_ReadIO(io, head, 4);
@@ -670,11 +671,11 @@ struct Importer {
                     done += got;
                 }
                 SDL_CloseIO(io);
-                if (!out) { error = "Kopyalanamadi (yer kalmamis olabilir)"; continue; }
+                if (!out) { error = txt("Could not copy (the storage may be full)", "Kopyalanamadi (yer kalmamis olabilir)"); continue; }
                 if (name == "disk.sbi") result_sbi = path_to_utf8(target);
                 else result_disc = path_to_utf8(target);
             }
-            if (result_disc.empty() && error.empty()) error = "Secilen dosyalarda disk imaji (.bin / .iso) yok";
+            if (result_disc.empty() && error.empty()) error = txt("No disc image (.bin / .iso) among the chosen files", "Secilen dosyalarda disk imaji (.bin / .iso) yok");
             finished = true;
             running = false;
         });
@@ -767,14 +768,14 @@ bool capture_cover(const fs::path& disc_path, const fs::path& sbi_path, const fs
     DiscImage disc;
     std::string err;
     if (!disc.open(disc_path, &err) || (!sbi_path.empty() && !disc.load_sbi(sbi_path, &err))) {
-        host_log("Kapak: disk acilamadi: %s", err.c_str());
+        host_log("Cover: could not open the disc: %s", err.c_str());
         return false;
     }
     rt.attach_disc(&disc);
     const auto cnf = disc.parse_system_cnf();
     PsxExeImage exe{};
     if (!cnf || !parse_psx_exe(disc.extract_file(cnf->boot_path), exe, &err)) {
-        host_log("Kapak: oyun dosyasi okunamadi");
+        host_log("Cover: could not read the game file");
         return false;
     }
     rt.load_exe(exe, ctx);
@@ -800,7 +801,7 @@ bool capture_cover(const fs::path& disc_path, const fs::path& sbi_path, const fs
         rt.gpu().export_bgra8888(frame, fw, fh, false);
         double blue = 0, white = 0;
         cover_stats(frame, fw, fh, blue, white);
-        if (SDL_getenv("VSPORT_COVER_DEBUG")) host_log("kapak kare %u mavi %.3f beyaz %.3f", vb, blue, white);
+        if (SDL_getenv("VSPORT_COVER_DEBUG")) host_log("cover vblank %u blue %.3f white %.3f", vb, blue, white);
         if (blue >= BURST) {
             const u32 fps = rt.video_60hz() ? 60u : 50u;
             const u32 lo = vb - fps * 9 / 10, hi = vb - fps / 2;
@@ -822,11 +823,11 @@ bool capture_cover(const fs::path& disc_path, const fs::path& sbi_path, const fs
     while (!ctx.halted && !found && !cancel.load() && rt.vblank_count() < TO) rt.run(ctx, 0x00FF'FFFF'FFFF'FFFFull);    rt.set_vblank_callback(nullptr);
     if (cancel.load()) return false;
     if (best.vb == 0) {
-        host_log("Kapak: uygun kare bulunamadi");
+        host_log("Cover: no suitable frame found");
         return false;
     }
     const bool ok = write_cover_png(best, out);
-    host_log("Kapak resmi %s: kare %u, %.1f s", ok ? "kaydedildi" : "KAYDEDILEMEDI", best.vb,
+    host_log("Cover picture %s: vblank %u, %.1f s", ok ? "saved" : "NOT SAVED", best.vb,
              static_cast<double>(SDL_GetTicks() - t0) / 1000.0);
     return ok;
 }
@@ -918,11 +919,11 @@ struct App {
         std::error_code ec;
         if (!fs::exists(cover_png(), ec)) {
             if (!cover.running()) cover.start(settings.disc, settings.sbi, cover_png());
-            show_notice("Simge hazirlaniyor (yarim dakika kadar)", 4000);
+            show_notice(txt("Preparing the icon (about half a minute)", "Simge hazirlaniyor (yarim dakika kadar)"), 4000);
             return;
         }
-        if (android_pin_shortcut(cover_png())) show_notice("Ana ekrana Rood Inverse simgesi eklensin mi?", 6000);
-        else show_notice("Bu telefon ana ekrana kisayol eklemeyi desteklemiyor", 5000);
+        if (android_pin_shortcut(cover_png())) show_notice(txt("Add the Rood Inverse icon to the home screen?", "Ana ekrana Rood Inverse simgesi eklensin mi?"), 6000);
+        else show_notice(txt("This phone does not support home screen shortcuts", "Bu telefon ana ekrana kisayol eklemeyi desteklemiyor"), 5000);
 #endif
     }
 
@@ -1025,19 +1026,19 @@ struct App {
         Importer imp;
         Menu menu;
         menu.title = "Vagrant Story";
-        menu.footer = problem.empty() ? "Kendi diskinizin imaji gerekir" : problem;
+        menu.footer = problem.empty() ? txt("An image of your own disc is needed", "Kendi diskinizin imaji gerekir") : problem;
         bool picking = false;
         const fs::path disc_dir = data / "disk";
         const auto build = [&]() {
             std::vector<MenuItem> items;
             if (imp.running) {
-                items.push_back({"Kopyalaniyor...", [&] {
+                items.push_back({txt("Copying...", "Kopyalaniyor..."), [&] {
                                      const u64 t = imp.total.load();
                                      return t ? std::to_string(static_cast<int>(imp.done.load() * 100 / t)) + "%" : std::string("...");
                                  }, nullptr});
                 return items;
             }
-            items.push_back({"Disk imaji sec (.bin + .sbi)", nullptr, [&](int) {
+            items.push_back({txt("Choose disc image (.bin + .sbi)", "Disk imaji sec (.bin + .sbi)"), nullptr, [&](int) {
                                  picking = true;
                                  {
                                      std::lock_guard<std::mutex> lock(imp.m);
@@ -1046,7 +1047,7 @@ struct App {
                                  }
                                  SDL_ShowOpenFileDialog(Importer::on_files, &imp, video.window, nullptr, 0, nullptr, true);
                              }});
-            items.push_back({"Cikis", nullptr, [&](int) { quit = true; }});
+            items.push_back({txt("Quit", "Cikis"), nullptr, [&](int) { quit = true; }});
             return items;
         };
         while (!quit) {
@@ -1074,7 +1075,7 @@ struct App {
                     settings.disc = path_from_utf8(imp.result_disc);
                     settings.sbi = imp.result_sbi.empty() ? fs::path() : path_from_utf8(imp.result_sbi);
                     save_settings();
-                    host_log("Disk kopyalandi: %s", imp.result_disc.c_str());
+                    host_log("Disc copied: %s", imp.result_disc.c_str());
                     return true;
                 }
                 menu.footer = imp.error;
@@ -1107,7 +1108,7 @@ struct App {
             dir = home ? path_from_utf8(home) : fs::current_path(ec);
         }
         Menu menu;
-        menu.footer = problem.empty() ? "Vagrant Story disk imajini secin (.cue / .bin / .iso)" : problem;
+        menu.footer = problem.empty() ? txt("Choose the Vagrant Story disc image (.cue / .bin / .iso)", "Vagrant Story disk imajini secin (.cue / .bin / .iso)") : problem;
         bool done = false, chosen = false;
         std::vector<fs::path> entries;
         fs::path listed;
@@ -1152,7 +1153,7 @@ struct App {
                                      }
                                  }});
             }
-            items.push_back({"Cikis", nullptr, [&](int) { quit = true; }});
+            items.push_back({txt("Quit", "Cikis"), nullptr, [&](int) { quit = true; }});
             return items;
         };
         while (!done && !quit) {
@@ -1177,7 +1178,7 @@ struct App {
         }
         if (chosen) {
             save_settings();
-            host_log("Disk secildi: %s", path_to_utf8(settings.disc).c_str());
+            host_log("Disc chosen: %s", path_to_utf8(settings.disc).c_str());
         }
         return chosen;
 #endif
@@ -1192,7 +1193,7 @@ struct App {
 App::GameEnd App::run_game() {
     const auto fail = [&](const std::string& m) {
         last_error = m;
-        host_log("HATA: %s", m.c_str());
+        host_log("ERROR: %s", m.c_str());
         return GameEnd::Error;
     };
 
@@ -1219,26 +1220,26 @@ App::GameEnd App::run_game() {
         std::ifstream in(launcher::cheats_path(), std::ios::binary);
         const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
         cheats.parse(text, nullptr);
-        host_log("Hile kodlari: %zu acik", cheats.enabled_count());
+        host_log("Cheat codes: %zu on", cheats.enabled_count());
     }
     TextureReplacer texrep;
     if (settings.texture_pack && scale > 1u) {
         const std::size_t n = texrep.scan(launcher::texture_pack_dir());
-        if (n) host_log("Doku paketi: %zu degistirme dokusu", n);
+        if (n) host_log("Texture pack: %zu replacement textures", n);
     }
     if (settings.texture_dump && scale > 1u) texrep.set_dump_dir(launcher::texture_pack_dir() / "_dokum");
     if (texrep.active()) rt.gpu().set_texture_replacer(&texrep);
 
 #ifdef VSPORT_HAS_AOT_MODULES
-    host_log("Derlenmis kod: %zu fonksiyon", register_all_generated_modules(rt));
+    host_log("Compiled code: %zu functions", register_all_generated_modules(rt));
 #endif
 
     std::string err;
-    if (!disc.open(settings.disc, &err)) return fail("Disk acilamadi: " + err);
+    if (!disc.open(settings.disc, &err)) return fail(txt("Could not open the disc: ", "Disk acilamadi: ") + err);
     if (!settings.sbi.empty() && !disc.load_sbi(settings.sbi, &err)) return fail(err);
     if (disc.subq_override_count() == 0 && disc.volume_id() == "SLES-02754") {
-        host_log("UYARI: PAL disk icin .sbi dosyasi yok; oyun New Game'den sonra durur");
-        show_notice("PAL disk: .sbi dosyasi bulunamadi", 6000);
+        host_log("WARNING: no .sbi file for the PAL disc; the game stops after New Game");
+        show_notice(txt("PAL disc: .sbi file not found", "PAL disk: .sbi dosyasi bulunamadi"), 6000);
     }
     rt.attach_disc(&disc);
     const fs::path memcard = settings.memcard.empty() ? launcher::default_memcard_path() : settings.memcard;
@@ -1247,15 +1248,15 @@ App::GameEnd App::run_game() {
         fs::create_directories(memcard.parent_path(), ec);
     }
     if (!rt.attach_memory_card(0, memcard, &err)) {
-        host_log("Hafiza karti acilamadi: %s", err.c_str());
-        show_notice("Hafiza karti acilamadi", 6000);
+        host_log("Could not open the memory card: %s", err.c_str());
+        show_notice(txt("Could not open the memory card", "Hafiza karti acilamadi"), 6000);
     }
     const auto cnf = disc.parse_system_cnf();
-    if (!cnf) return fail("Diskte SYSTEM.CNF yok; bu bir PlayStation diski degil gibi.");
+    if (!cnf) return fail(txt("No SYSTEM.CNF on the disc; this does not look like a PlayStation disc.", "Diskte SYSTEM.CNF yok; bu bir PlayStation diski degil gibi."));
     PsxExeImage exe{};
-    if (!parse_psx_exe(disc.extract_file(cnf->boot_path), exe, &err)) return fail("PS-X EXE okunamadi: " + err);
+    if (!parse_psx_exe(disc.extract_file(cnf->boot_path), exe, &err)) return fail(txt("Could not read the PS-X EXE: ", "PS-X EXE okunamadi: ") + err);
     rt.load_exe(exe, ctx);
-    host_log("Yuklendi: %s (%s, %ux ic cozunurluk)", cnf->boot_path.c_str(), disc.volume_id().c_str(), scale);
+    host_log("Loaded: %s (%s, %ux internal resolution)", cnf->boot_path.c_str(), disc.volume_id().c_str(), scale);
     {
         // Android, first start: the Rood Inverse for the home screen shortcut, made in the
         // background while the game runs (elsewhere only for tests)
@@ -1297,20 +1298,20 @@ App::GameEnd App::run_game() {
         std::ofstream out(path, std::ios::binary | std::ios::trunc);
         out.write(reinterpret_cast<const char*>(st.data()), static_cast<std::streamsize>(st.size()));
         const bool ok = static_cast<bool>(out);
-        host_log("%s: %s", what.c_str(), ok ? "kaydedildi" : "KAYDEDILEMEDI");
-        show_notice(what + (ok ? " kaydedildi" : " KAYDEDILEMEDI"));
+        host_log("State %s: %s", path_to_utf8(path.filename()).c_str(), ok ? "saved" : "NOT SAVED");
+        show_notice(what + (ok ? txt(" saved", " kaydedildi") : txt(" NOT SAVED", " KAYDEDILEMEDI")));
         return ok;
     };
     const auto load_state_file = [&](const fs::path& path, const std::string& what) {
         std::ifstream in(path, std::ios::binary);
         if (!in) {
-            show_notice(what + ": kayit yok");
+            show_notice(what + txt(": nothing saved", ": kayit yok"));
             return false;
         }
         std::vector<u8> data_bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
         const bool ok = rt.load_state(std::move(data_bytes), ctx);
-        host_log("%s: %s", what.c_str(), ok ? "yuklendi" : "YUKLENEMEDI");
-        show_notice(what + (ok ? " yuklendi" : " yuklenemedi"));
+        host_log("State %s: %s", path_to_utf8(path.filename()).c_str(), ok ? "loaded" : "NOT LOADED");
+        show_notice(what + (ok ? txt(" loaded", " yuklendi") : txt(" could not be loaded", " yuklenemedi")));
         return ok;
     };
     const bool autosave_on = settings.autosave && !hidden;
@@ -1327,7 +1328,7 @@ App::GameEnd App::run_game() {
     bool menu_open = false, backgrounded = false;
     Menu menu;
     menu.title = "Vagrant Story";
-    menu.footer = "Menu: Esc / L3+R3 / ekrandaki = tusu";
+    menu.footer = txt("Menu: Esc / L3+R3 / the on-screen = button", "Menu: Esc / L3+R3 / ekrandaki = tusu");
     u16 touch_held = 0;
     u64 next_frame = SDL_GetTicksNS();
     int scale_choice = static_cast<int>(scale);
@@ -1353,7 +1354,7 @@ App::GameEnd App::run_game() {
     };
     const auto pause_items = [&]() {
         std::vector<MenuItem> it;
-        it.push_back({"Devam et", nullptr, [&](int) { close_menu(); }});
+        it.push_back({txt("Continue", "Devam et"), nullptr, [&](int) { close_menu(); }});
         it.push_back({"Durumu kaydet", [&] { return "yuva " + std::to_string(slot); }, nullptr});
         it.back().act = [&](int dir) {
             if (dir == 0 || dir == 1) { request(OP_SAVE); close_menu(); }
@@ -1362,38 +1363,38 @@ App::GameEnd App::run_game() {
         it.back().act = [&](int dir) {
             if (dir == 0 || dir == 1) { request(OP_LOAD); close_menu(); }
         };
-        it.push_back({"Durum yuvasi", [&] { return std::to_string(slot); }, [&](int dir) { slot = (slot - 1 + (dir < 0 ? 4 : 1)) % 5 + 1; }});
-        it.push_back({"Ekran orani", [&] { return std::string(launcher::ASPECT_NAMES[std::clamp(settings.aspect, 0, launcher::ASPECT_COUNT - 1)]); },
+        it.push_back({txt("State slot", "Durum yuvasi"), [&] { return std::to_string(slot); }, [&](int dir) { slot = (slot - 1 + (dir < 0 ? 4 : 1)) % 5 + 1; }});
+        it.push_back({txt("Aspect ratio", "Ekran orani"), [&] { return std::string(launcher::aspect_name(settings.aspect)); },
                       [&](int dir) { settings.aspect = (settings.aspect + (dir < 0 ? launcher::ASPECT_COUNT - 1 : 1)) % launcher::ASPECT_COUNT;
                                      settings.widescreen = settings.aspect != 0; }});
-        it.push_back({"3D genislet", [&] { return std::string(settings.widescreen ? "Acik" : "Kapali"); },
+        it.push_back({txt("Widen 3D", "3D genislet"), [&] { return std::string(settings.widescreen ? txt("On", "Acik") : txt("Off", "Kapali")); },
                       [&](int) { settings.widescreen = !settings.widescreen; }});
-        it.push_back({"Goruntu", [&] { return std::string(settings.filter == 0 ? "Keskin" : "Yumusak"); }, [&](int) {
+        it.push_back({txt("Picture", "Goruntu"), [&] { return std::string(settings.filter == 0 ? txt("Sharp", "Keskin") : txt("Smooth", "Yumusak")); }, [&](int) {
                           settings.filter = settings.filter == 0 ? 1 : 0;
                           video.set_filter(settings.filter);
                       }});
-        it.push_back({"Ic cozunurluk", [&] { return std::to_string(scale_choice) + "x"; }, [&](int dir) {
+        it.push_back({txt("Internal resolution", "Ic cozunurluk"), [&] { return std::to_string(scale_choice) + "x"; }, [&](int dir) {
                           scale_choice = std::clamp(scale_choice + (dir < 0 ? -1 : 1), 1, max_scale);
                           settings.internal_scale = scale_choice;
                           rt.gpu().set_internal_scale(static_cast<u32>(scale_choice));
                           rt.pgxp().set_enabled(settings.pgxp > 0 && scale_choice > 1);
                       }});
-        it.push_back({"PAL 60 Hz", [&] { return std::string(settings.pal60 ? "Acik" : "Kapali"); }, [&](int) {
+        it.push_back({"PAL 60 Hz", [&] { return std::string(settings.pal60 ? txt("On", "Acik") : txt("Off", "Kapali")); }, [&](int) {
                           settings.pal60 = !settings.pal60;
                           rt.set_pal60(settings.pal60);
                       }});
-        it.push_back({"Ses", [&] { return std::string(audio.muted ? "Kapali" : "Acik"); }, [&](int) {
+        it.push_back({txt("Sound", "Ses"), [&] { return std::string(audio.muted ? txt("Off", "Kapali") : txt("On", "Acik")); }, [&](int) {
                           audio.muted = !audio.muted;
                           settings.muted = audio.muted;
                           audio.apply_gain();
                       }});
-        it.push_back({"Ses duzeyi", [&] { return std::to_string(settings.volume) + "%"; }, [&](int dir) {
+        it.push_back({txt("Volume", "Ses duzeyi"), [&] { return std::to_string(settings.volume) + "%"; }, [&](int dir) {
                           settings.volume = std::clamp(settings.volume + (dir < 0 ? -10 : 10), 0, 100);
                           audio.volume = settings.volume;
                           audio.apply_gain();
                       }});
-        it.push_back({"Dokunmatik tuslar", [&] {
-                          static const char* names[3] = {"Otomatik", "Her zaman", "Kapali"};
+        it.push_back({txt("Touch buttons", "Dokunmatik tuslar"), [&] {
+                          const char* names[3] = {txt("Automatic", "Otomatik"), txt("Always", "Her zaman"), txt("Off", "Kapali")};
                           return std::string(names[std::clamp(settings.touch_controls, 0, 2)]);
                       },
                       [&](int dir) {
@@ -1401,20 +1402,20 @@ App::GameEnd App::run_game() {
                           touch.visible = settings.touch_controls == 1;
                       }});
 #ifndef SDL_PLATFORM_ANDROID
-        it.push_back({"Tam ekran", [&] { return std::string(settings.fullscreen ? "Acik" : "Kapali"); }, [&](int) { toggle_fullscreen(); }});
+        it.push_back({txt("Fullscreen", "Tam ekran"), [&] { return std::string(settings.fullscreen ? txt("On", "Acik") : txt("Off", "Kapali")); }, [&](int) { toggle_fullscreen(); }});
 #endif
 #ifdef SDL_PLATFORM_ANDROID
-        it.push_back({"Ana ekran simgesi", nullptr, [&](int dir) {
+        it.push_back({txt("Home screen icon", "Ana ekran simgesi"), nullptr, [&](int dir) {
                           if (dir == 0) { close_menu(); offer_shortcut(); }
                       }});
 #endif
-        it.push_back({"Disk degistir", nullptr, [&](int) {
+        it.push_back({txt("Change disc", "Disk degistir"), nullptr, [&](int) {
                           end = GameEnd::ChangeDisc;
                           running = false;
                           close_menu();
                           rt.request_break();
                       }});
-        it.push_back({"Cikis", nullptr, [&](int) {
+        it.push_back({txt("Quit", "Cikis"), nullptr, [&](int) {
                           running = false;
                           close_menu();
                           rt.request_break();
@@ -1439,7 +1440,7 @@ App::GameEnd App::run_game() {
             if (SDL_Surface* s = SDL_RenderReadPixels(video.renderer, nullptr)) {
                 const bool ok = write_ppm(window_dump_path, s);
                 SDL_DestroySurface(s);
-                host_log("Pencere goruntusu %s: %s (kare %u)", ok ? "kaydedildi" : "KAYDEDILEMEDI", path_to_utf8(window_dump_path).c_str(), shown_vb);
+                host_log("Window picture %s: %s (vblank %u)", ok ? "saved" : "NOT SAVED", path_to_utf8(window_dump_path).c_str(), shown_vb);
             }
             window_dump_path.clear();
             running = false;
@@ -1494,7 +1495,7 @@ App::GameEnd App::run_game() {
                         case SDL_SCANCODE_F7: request(OP_LOAD); break;
                         case SDL_SCANCODE_F6:
                             slot = slot % 5 + 1;
-                            show_notice("Durum yuvasi " + std::to_string(slot));
+                            show_notice(txt("State slot ", "Durum yuvasi ") + std::to_string(slot));
                             break;
                         case SDL_SCANCODE_F3:
                             if (e.key.mod & SDL_KMOD_SHIFT) settings.widescreen = !settings.widescreen;
@@ -1502,7 +1503,7 @@ App::GameEnd App::run_game() {
                                 settings.aspect = (settings.aspect + 1) % launcher::ASPECT_COUNT;
                                 settings.widescreen = settings.aspect != 0; // Wider ratio = wider view
                             }
-                            show_notice(std::string("Oran: ") + launcher::ASPECT_NAMES[settings.aspect] + (settings.widescreen ? " (3D genis)" : ""));
+                            show_notice(std::string(txt("Aspect: ", "Oran: ")) + launcher::aspect_name(settings.aspect) + (settings.widescreen ? txt(" (wide 3D)", " (3D genis)") : ""));
                             break;
                         case SDL_SCANCODE_F4:
                             settings.filter = settings.filter == 0 ? 1 : 0;
@@ -1512,7 +1513,7 @@ App::GameEnd App::run_game() {
                             audio.muted = !audio.muted;
                             settings.muted = audio.muted;
                             audio.apply_gain();
-                            show_notice(audio.muted ? "Ses kapali" : "Ses acik");
+                            show_notice(audio.muted ? txt("Sound off", "Ses kapali") : txt("Sound on", "Ses acik"));
                             break;
                         case SDL_SCANCODE_F12: rt.gpu().dump_ppm(data / "vram_snapshot.ppm", true); break;
                         default: break;
@@ -1595,8 +1596,8 @@ App::GameEnd App::run_game() {
     rt.set_vblank_callback(present_and_pump);
     menu_open = test_menu;
     if (!load_state_arg.empty()) load_state_file(load_state_arg, "Test durumu");
-    else if (autosave_on && fs::exists(state_file(0))) load_state_file(state_file(0), "Kaldiginiz yerden devam");
-    host_log("Emulasyon basladi");
+    else if (autosave_on && fs::exists(state_file(0))) load_state_file(state_file(0), txt("Continue where you left off", "Kaldiginiz yerden devam"));
+    host_log("Emulation started");
 
     while (!ctx.halted) {
         rt.run(ctx, 0x00FF'FFFF'FFFF'FFFFull);
@@ -1615,20 +1616,20 @@ App::GameEnd App::run_game() {
             }
         }
         if (runahead > 0 && ra_phase > 0) {
-            if (!rt.load_state_fast(ra_state, ctx)) host_log("Gecikme azaltma: durum geri yuklenemedi");
+            if (!rt.load_state_fast(ra_state, ctx)) host_log("Run-ahead: state could not be restored");
             rt.runahead_snapshot(true);
             ra_phase = 0;
         }
         if (!running) {
-            if (autosave_on) save_state_file(state_file(0), "Otomatik kayit");
+            if (autosave_on) save_state_file(state_file(0), txt("Autosave", "Otomatik kayit"));
             break;
         }
         if (autosave_due) {
             autosave_due = false;
-            save_state_file(state_file(0), "Otomatik kayit");
+            save_state_file(state_file(0), txt("Autosave", "Otomatik kayit"));
         }
-        if (state_op == OP_SAVE) save_state_file(state_file(slot), "Durum " + std::to_string(slot));
-        else if (state_op == OP_LOAD && load_state_file(state_file(slot), "Durum " + std::to_string(slot))) achievements.reset();
+        if (state_op == OP_SAVE) save_state_file(state_file(slot), txt("State ", "Durum ") + std::to_string(slot));
+        else if (state_op == OP_LOAD && load_state_file(state_file(slot), txt("State ", "Durum ") + std::to_string(slot))) achievements.reset();
         state_op = OP_NONE;
         if (snapshot_due) {
             snapshot_due = false;
@@ -1639,15 +1640,15 @@ App::GameEnd App::run_game() {
             std::vector<u8> st = rewind_states.back();
             if (rewind_states.size() > 1) rewind_states.pop_back();
             if (rt.load_state(std::move(st), ctx)) {
-                show_notice("Geri sariliyor");
+                show_notice(txt("Rewinding", "Geri sariliyor"));
                 achievements.reset();
             }
             SDL_Delay(120);
         }
     }
     if (ctx.halted) {
-        host_log("Islemci durdu (PC=0x%08X)", ctx.pc);
-        last_error = "Oyun durdu (emulasyon hatasi). Ayrinti: VagrantStory.log";
+        host_log("CPU halted (PC=0x%08X)", ctx.pc);
+        last_error = txt("The game stopped (emulation error). Details: VagrantStory.log", "Oyun durdu (emulasyon hatasi). Ayrinti: VagrantStory.log");
         end = GameEnd::Error;
     }
     gamepads.rumble(false, 0);
@@ -1714,7 +1715,7 @@ int main(int argc, char** argv) {
     SDL_SetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON, "1");    // Back button opens the menu
     SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight");
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMEPAD)) {
-        std::fprintf(stderr, "SDL baslatilamadi: %s\n", SDL_GetError());
+        std::fprintf(stderr, "SDL failed to start: %s\n", SDL_GetError());
         return 1;
     }
 
@@ -1728,7 +1729,7 @@ int main(int argc, char** argv) {
 #endif
     g_log = std::fopen(path_to_utf8(app.data / "VagrantStory.log").c_str(), "w");
     host_log("Vagrant Story Native Port %s, SDL %d.%d.%d, %s", VERSION, SDL_MAJOR_VERSION, SDL_MINOR_VERSION, SDL_MICRO_VERSION, SDL_GetPlatform());
-    host_log("Veri klasoru: %s", path_to_utf8(app.data).c_str());
+    host_log("Data folder: %s", path_to_utf8(app.data).c_str());
 
     {
         std::error_code ec;
@@ -1766,20 +1767,20 @@ int main(int argc, char** argv) {
     const int wh = std::clamp(app.settings.window_height, 240, 2160);
     app.video.window = SDL_CreateWindow("Vagrant Story", launcher::window_width_for(wh, app.settings.aspect), wh, flags);
     if (!app.video.window) {
-        host_log("Pencere acilamadi: %s", SDL_GetError());
+        host_log("Could not open the window: %s", SDL_GetError());
         return 1;
     }
     app.video.renderer = SDL_CreateRenderer(app.video.window, nullptr);
     if (!app.video.renderer) {
-        host_log("Cizici acilamadi: %s", SDL_GetError());
+        host_log("Could not open the renderer: %s", SDL_GetError());
         return 1;
     }
     SDL_SetRenderVSync(app.video.renderer, 0); // Pacing comes from the game's own frame timing
     SDL_SetRenderDrawBlendMode(app.video.renderer, SDL_BLENDMODE_BLEND);
-    host_log("Cizici: %s", SDL_GetRendererName(app.video.renderer));
+    host_log("Renderer: %s", SDL_GetRendererName(app.video.renderer));
     SDL_DisableScreenSaver();
-    if (app.audio.open()) host_log("Ses acik (44.1 kHz)");
-    else host_log("Ses acilamadi: %s", SDL_GetError());
+    if (app.audio.open()) host_log("Sound on (44.1 kHz)");
+    else host_log("Could not open sound: %s", SDL_GetError());
 
     std::string problem;
     for (;;) {
@@ -1787,7 +1788,7 @@ int main(int argc, char** argv) {
         const bool disc_ok = !app.settings.disc.empty() && fs::exists(app.settings.disc, ec);
         if (!disc_ok || !problem.empty()) {
             if (app.hidden) {
-                host_log("Disk yok ya da acilamadi: %s", problem.c_str());
+                host_log("No disc, or it could not be opened: %s", problem.c_str());
                 break;
             }
             if (!app.choose_disc(problem)) break;
@@ -1808,7 +1809,7 @@ int main(int argc, char** argv) {
 
     if (!app.hidden) app.save_settings();
     app.cover.stop();
-    host_log("Kapaniyor");
+    host_log("Shutting down");
     app.gamepads.close();
     app.audio.close();
     if (app.video.tex) SDL_DestroyTexture(app.video.tex);

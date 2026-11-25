@@ -1,6 +1,7 @@
-﻿#include "vsport/cdrom_iso.hpp"
+#include "vsport/cdrom_iso.hpp"
 #include "vsport/cheats.hpp"
 #include "vsport/free_camera.hpp"
+#include "vsport/i18n.hpp"
 #include "vsport/pad_mapping.hpp"
 #include "vsport/psx_exe.hpp"
 #include "vsport/runtime.hpp"
@@ -188,7 +189,7 @@ void start_exit_watchdog() {
     started = true;
     CloseHandle(CreateThread(nullptr, 0, [](LPVOID) -> DWORD {
         Sleep(8000);
-        host_log("Kapanis 8 saniyede bitmedi, surec zorla sonlandiriliyor");
+        host_log("Shutdown did not finish in 8 seconds, ending the process");
         TerminateProcess(GetCurrentProcess(), 0);
         return 0;
     }, nullptr, 0, nullptr));
@@ -284,8 +285,9 @@ struct Win32HostState {
 
     void update_window_title(HWND hwnd) const {
         char title[256]{};
-        const char* backend = (d3d && d3d->is_initialized()) ? d3d->shader_mode_name() : "GDI Yazilim";
-        const char* sound   = (audio && audio->is_open()) ? (audio->is_muted() ? "Sessiz" : "44.1kHz ADPCM") : "Kapali";
+        const char* backend = (d3d && d3d->is_initialized()) ? d3d->shader_mode_name() : txt("GDI software", "GDI Yazılım");
+        const char* sound   = (audio && audio->is_open()) ? (audio->is_muted() ? txt("Muted", "Sessiz") : "44.1kHz ADPCM")
+                                                          : txt("Off", "Kapalı");
         if (!notice.empty() && GetTickCount64() < notice_until) {
             const std::string t = "Vagrant Story - " + notice; // UTF-8 (achievement names, Turkish letters)
             std::wstring w(static_cast<std::size_t>(MultiByteToWideChar(CP_UTF8, 0, t.c_str(), -1, nullptr, 0)), L'\0');
@@ -294,10 +296,13 @@ struct Win32HostState {
             return;
         }
         std::snprintf(title, sizeof(title),
-                      "Vagrant Story Native Port [%s | %s%s | Ses: %s] - F11: Tam ekran | F3: Oran | Shift+F3: 3D genislet | F4: Shader | M: Ses | Tab: Hizli",
-                      backend, launcher::ASPECT_NAMES[std::clamp(aspect, 0, launcher::ASPECT_COUNT - 1)],
-                      widescreen ? " genis 3D" : "", sound);
-        SetWindowTextA(hwnd, title);
+                      txt("Vagrant Story Native Port [%s | %s%s | Sound: %s] - F11: Fullscreen | F3: Aspect | Shift+F3: Widen 3D | F4: Shader | M: Mute | Tab: Fast",
+                          "Vagrant Story Native Port [%s | %s%s | Ses: %s] - F11: Tam ekran | F3: Oran | Shift+F3: 3D genişlet | F4: Shader | M: Ses | Tab: Hızlı"),
+                      backend, launcher::aspect_name(aspect), widescreen ? txt(" wide 3D", " geniş 3D") : "", sound);
+        // UTF-8 (Turkish letters)
+        std::wstring w(static_cast<std::size_t>(MultiByteToWideChar(CP_UTF8, 0, title, -1, nullptr, 0)), L'\0');
+        if (!w.empty()) MultiByteToWideChar(CP_UTF8, 0, title, -1, w.data(), static_cast<int>(w.size()));
+        SetWindowTextW(hwnd, w.c_str());
     }
 };
 
@@ -340,11 +345,11 @@ LRESULT CALLBACK HostWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) 
                     st->toggle_fullscreen(hwnd); // Leave fullscreen first so the dialog is visible
                 }
                 const int answer = MessageBoxW(hwnd,
-                    L"Oyundan Ã§Ä±kmak istiyor musunuz?\n\n"
-                    L"Oyunda kaydetmediÄŸiniz ilerleme kaybolur.",
+                    txt(L"Quit the game?\n\nProgress you have not saved in the game will be lost.",
+                        L"Oyundan çıkmak istiyor musunuz?\n\nOyunda kaydetmediğiniz ilerleme kaybolur."),
                     L"Vagrant Story", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2);
                 if (answer == IDYES) {
-                    host_log("Esc: cikis onaylandi");
+                    host_log("Esc: quit confirmed");
                     PostQuitMessage(0);
                 }
                 return 0;
@@ -381,17 +386,17 @@ LRESULT CALLBACK HostWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) 
                 st->rt->request_break();
             } else if (st && wparam == VK_F6) {
                 st->state_slot = st->state_slot % 5 + 1;
-                st->show_notice(hwnd, "Durum yuvasi " + std::to_string(st->state_slot));
+                st->show_notice(hwnd, txt("State slot ", "Durum yuvası ") + std::to_string(st->state_slot));
             } else if (st && wparam == VK_F12) {
                 st->rt->gpu().dump_ppm("vram_snapshot.ppm", true);
                 std::cout << "[vs_host] VRAM goruntusu kaydedildi: vram_snapshot.ppm\n";
             }
             break;
         case WM_CLOSE:
-            host_log("Pencere kapatiliyor (WM_CLOSE)");
+            host_log("Window closing (WM_CLOSE)");
             break; // DefWindowProc destroys the window
         case WM_DESTROY:
-            host_log("Pencere yok edildi, cikis istendi");
+            host_log("Window destroyed, quit requested");
             start_exit_watchdog();
             PostQuitMessage(0);
             return 0;
@@ -521,7 +526,7 @@ int main(int argc, char** argv) {
             char hash[33] = {};
             rc_hash_init_default_cdreader();
             const int ok = rc_hash_generate_from_file(hash, RC_CONSOLE_PLAYSTATION, argv[++i]);
-            std::printf("[vs_host] RetroAchievements hash: %s\n", ok ? hash : "(hesaplanamadi)");
+            std::printf("[vs_host] RetroAchievements hash: %s\n", ok ? hash : "(could not be computed)");
             return ok ? 0 : 1;
         } else if (arg == "--pal60" && i + 1 < argc) {
             pal60_flag = std::atoi(argv[++i]) != 0 ? 1 : 0;
@@ -630,7 +635,7 @@ int main(int argc, char** argv) {
             dump_ram_path = argv[++i];
         } else if (arg == "--press" && i + 1 < argc) {
             if (!parse_presses(argv[++i])) {
-                std::cerr << "[HATA] --press bicimi: BUTON@VBLANK[:KARE][,...] (or. START@560,CROSS@900:4)\n";
+                std::cerr << "[ERROR] --press format: BUTTON@VBLANK[:FRAMES][,...] (e.g. START@560,CROSS@900:4)\n";
                 return 1;
             }
         }
@@ -650,7 +655,7 @@ int main(int argc, char** argv) {
         D3D11Renderer td3d;
         std::string terr;
         if (!td3d.initialize(thwnd, 640, 480, &terr)) {
-            std::cerr << "[FAIL] D3D11 smoke test basarisiz: " << terr << "\n";
+            std::cerr << "[FAIL] D3D11 smoke test failed: " << terr << "\n";
             DestroyWindow(thwnd);
             return 1;
         }
@@ -658,7 +663,7 @@ int main(int argc, char** argv) {
             td3d.present_vram(trt.gpu(), false, m == 1 ? 16.0f / 9.0f : (m == 2 ? 0.0f : 4.0f / 3.0f), false);
             td3d.cycle_shader_mode();
         }
-        std::printf("[PASS] D3D11 + HLSL Shader Model 4.0 dogrulandi! GPU: %s\n", td3d.adapter_name().c_str());
+        std::printf("[PASS] D3D11 + HLSL Shader Model 4.0 verified. GPU: %s\n", td3d.adapter_name().c_str());
         td3d.shutdown();
         DestroyWindow(thwnd);
         return 0;
@@ -667,10 +672,11 @@ int main(int argc, char** argv) {
 
     // Errors go to the log and, in windowed mode, to a message box (no console on double-click)
     const auto fail = [&](const std::string& msg) {
-        std::cerr << "[HATA] " << msg << "\n";
+        std::cerr << "[ERROR] " << msg << "\n";
 #ifdef _WIN32
         if (!headless) {
-            launcher::show_message(msg + "\n\nAyarlar penceresini acmak icin oyunu Shift tusuna basili tutarak baslatin.", true);
+            launcher::show_message(msg + txt("\n\nTo open the settings window, hold Shift while starting the game.",
+                                                  "\n\nAyarlar penceresini açmak için oyunu Shift tuşuna basılı tutarak başlatın."), true);
         }
 #endif
         return 1;
@@ -687,7 +693,7 @@ int main(int argc, char** argv) {
         _wfopen_s(&g_host_log, (launcher::settings_path().parent_path() / L"VagrantStory.log").c_str(), L"w");
         SYSTEMTIME now{};
         GetLocalTime(&now);
-        host_log("Baslatildi %04u-%02u-%02u %02u:%02u:%02u", now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond);
+        host_log("Started %04u-%02u-%02u %02u:%02u:%02u", now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond);
     }
 #endif
 
@@ -699,12 +705,12 @@ int main(int argc, char** argv) {
             const bool disc_ok = !settings.disc.empty() && std::filesystem::exists(settings.disc, ec);
             const bool shift   = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
             if (settings.show_launcher || shift || !disc_ok) {
-                host_log("Ayarlar penceresi aciliyor");
+                host_log("Opening the settings window");
                 if (!launcher::run_settings_window(settings)) {
-                    host_log("Ayarlar penceresi kapatildi, oyun baslatilmadi");
+                    host_log("Settings window closed, game not started");
                     return 0; // Player closed the settings window
                 }
-                host_log("Ayarlar penceresi: Oyna");
+                host_log("Settings window: Play");
             }
             disc_path    = settings.disc;
             sbi_path     = settings.sbi;
@@ -712,10 +718,10 @@ int main(int argc, char** argv) {
         }
 #endif
         if (disc_path.empty()) {
-            std::cout << "Kullanim:\n"
-                      << "  vs_host --disc <VagrantStory.cue|.bin|.iso> [--sbi altkanal.sbi] [--headless] [--no-aot] [--cycles N] [--dump-vram vram.ppm]\n"
+            std::cout << "Usage:\n"
+                      << "  vs_host --disc <VagrantStory.cue|.bin|.iso> [--sbi subchannel.sbi] [--headless] [--no-aot] [--cycles N] [--dump-vram vram.ppm]\n"
                       << "  vs_host --self-demo [--headless] [--dump-vram demo.ppm]\n"
-                      << "  vs_host            (ayarlar penceresi; secimler VagrantStory.ini'ye kaydedilir)\n";
+                      << "  vs_host            (settings window; choices are saved to VagrantStory.ini)\n";
             return 1;
         }
     }
@@ -740,10 +746,10 @@ int main(int argc, char** argv) {
         const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
         std::vector<std::string> problems;
         cheats.parse(text, &problems);
-        std::printf("[vs_host] Hile kodlari: %zu hile acik (%zu tanimli)\n", cheats.enabled_count(), cheats.cheats().size());
-        for (const std::string& p : problems) std::printf("[vs_host] Hile dosyasi, %s\n", p.c_str());
+        std::printf("[vs_host] Cheat codes: %zu on (%zu defined)\n", cheats.enabled_count(), cheats.cheats().size());
+        for (const std::string& p : problems) std::printf("[vs_host] Cheat file, %s\n", p.c_str());
 #ifdef _WIN32
-        host_log("Hile kodlari: %zu acik, %zu tanimli, %zu sorunlu satir", cheats.enabled_count(), cheats.cheats().size(), problems.size());
+        host_log("Cheat codes: %zu on, %zu defined, %zu bad lines", cheats.enabled_count(), cheats.cheats().size(), problems.size());
 #endif
     }
     // Controller type: DualShock (vibration) unless switched off
@@ -752,7 +758,7 @@ int main(int argc, char** argv) {
     const bool free_cam_on = use_settings ? settings.free_camera : true;
     FreeCamera free_cam;
 #ifdef _WIN32
-    host_log("Serbest kamera: %s", free_cam_on ? "acik (sag cubuk, J/L/I/K)" : "kapali");
+    host_log("Free camera: %s", free_cam_on ? "on (right stick, J/L/I/K)" : "off");
 #endif
     bool cam_log_pushed = false; // Game log of right-stick pushes (see the vblank callback)
     FreeCamera::Status cam_log_status = FreeCamera::Status::Idle;
@@ -767,7 +773,7 @@ int main(int argc, char** argv) {
     const auto use_gpu_hr = [&rt](void* device) {
 #ifndef _WIN32
         (void)device;
-        std::printf("[vs_host] Ekran karti cizimi bu sistemde yok, islemci kullaniliyor\n");
+        std::printf("[vs_host] No graphics card renderer on this system, using the processor\n");
         (void)rt;
         return;
 #else
@@ -776,13 +782,13 @@ int main(int argc, char** argv) {
         if (b) {
             rt.gpu().set_hr_backend(std::move(b));
             if (rt.gpu().hr_backend() && rt.gpu().hr_backend()->gpu_picture_view()) {
-                std::printf("[vs_host] Yuksek cozunurluk ekran kartinda ciziliyor (Direct3D 11)\n");
+                std::printf("[vs_host] Upscaled picture drawn on the graphics card (Direct3D 11)\n");
                 return;
             }
-            err = "hedef doku olusturulamadi";
+            err = "could not create the target texture";
             rt.gpu().set_hr_backend(make_software_hr_backend());
         }
-        std::printf("[vs_host] Ekran karti cizimi baslatilamadi (%s), islemci kullaniliyor\n", err.c_str());
+        std::printf("[vs_host] Graphics card renderer failed to start (%s), using the processor\n", err.c_str());
 #endif
     };
     if (gpu_hr == 1 && headless && internal_scale > 1u) {
@@ -799,8 +805,8 @@ int main(int argc, char** argv) {
     if (texdump_dir.empty() && use_settings && settings.texture_dump) texdump_dir = launcher::texture_pack_dir() / "_dokum";
     if (!texpack_dir.empty()) {
         const std::size_t n = texrep.scan(texpack_dir);
-        std::printf("[vs_host] Doku paketi: %zu degistirme dokusu (%s)\n", n, texpack_dir.string().c_str());
-        if (n) host_log("Doku paketi: %zu degistirme dokusu", n);
+        std::printf("[vs_host] Texture pack: %zu replacement textures (%s)\n", n, texpack_dir.string().c_str());
+        if (n) host_log("Texture pack: %zu replacement textures", n);
     }
     if (!texdump_dir.empty()) texrep.set_dump_dir(texdump_dir);
     if (texrep.active()) rt.gpu().set_texture_replacer(&texrep);
@@ -817,7 +823,7 @@ int main(int argc, char** argv) {
 #ifdef VSPORT_HAS_AOT_MODULES
     if (use_aot && !self_demo) {
         const std::size_t aot_cnt = register_all_generated_modules(rt);
-        std::printf("[vs_host] Native C++20 AOT aktif: %zu derlenmis fonksiyon kaydedildi.\n", aot_cnt);
+        std::printf("[vs_host] Native C++20 AOT active: %zu compiled functions registered.\n", aot_cnt);
         std::fflush(stdout);
     }
 #else
@@ -827,18 +833,18 @@ int main(int argc, char** argv) {
     if (!disc_path.empty()) {
         std::string err;
         if (!disc.open(disc_path, &err)) {
-            return fail("Disk acilamadi: " + err);
+            return fail(txt("Could not open the disc: ", "Disk açılamadı: ") + err);
         }
         if (!sbi_path.empty() && !disc.load_sbi(sbi_path, &err)) {
             return fail(err);
         }
         if (disc.subq_override_count() > 0) {
-            std::printf("[vs_host] Alt kanal verisi yuklendi: %s (%zu sektor)\n",
+            std::printf("[vs_host] Subchannel data loaded: %s (%zu sectors)\n",
                         disc.sbi_path().string().c_str(), disc.subq_override_count());
         } else if (disc.volume_id() == "SLES-02754") {
-            std::printf("[vs_host] UYARI: Bu PAL disk LibCrypt korumali; diskin .sbi alt kanal dosyasi olmadan\n"
-                        "          oyun New Game'den sonra 'NOW LOADING'de kalir. .sbi dosyasini .cue ile ayni\n"
-                        "          klasore ayni adla koyun ya da --sbi <dosya> ile belirtin.\n");
+            std::printf("[vs_host] WARNING: this PAL disc is LibCrypt protected; without the disc's .sbi subchannel file\n"
+                        "          the game stays on 'NOW LOADING' after New Game. Put the .sbi next to the .cue\n"
+                        "          with the same name, or pass it with --sbi <file>.\n");
         }
         std::fflush(stdout);
         rt.attach_disc(&disc);
@@ -849,28 +855,30 @@ int main(int argc, char** argv) {
                                                                        : launcher::default_memcard_path();
         }
         if (rt.attach_memory_card(0, memcard_path, &err)) {
-            std::printf("[vs_host] Hafiza karti 1: %s (%u blok dolu)\n", memcard_path.string().c_str(),
+            std::printf("[vs_host] Memory card 1: %s (%u blocks used)\n", memcard_path.string().c_str(),
                         rt.memory_card(0).used_blocks());
         } else {
-            std::fprintf(stderr, "[UYARI] Hafiza karti acilamadi, kayit yapilamayacak: %s\n", err.c_str());
+            std::fprintf(stderr, "[WARNING] Could not open the memory card, saving will not work: %s\n", err.c_str());
 #ifdef _WIN32
-            if (!headless) launcher::show_message("Hafiza karti acilamadi, oyunda kayit yapilamayacak:\n" + err, true);
+            if (!headless) launcher::show_message(txt("Could not open the memory card; saving in the game will not work:\n",
+                                                     "Hafıza kartı açılamadı, oyunda kayıt yapılamayacak:\n") + err, true);
 #endif
         }
 
         const auto cnf = disc.parse_system_cnf();
         if (!cnf.has_value()) {
-            return fail("Diskte SYSTEM.CNF bulunamadi; bu bir PlayStation oyun diski degil gibi gorunuyor.");
+            return fail(txt("SYSTEM.CNF not found on the disc; this does not look like a PlayStation game disc.",
+                               "Diskte SYSTEM.CNF bulunamadı; bu bir PlayStation oyun diski değil gibi görünüyor."));
         }
 
         const auto exe_bytes = disc.extract_file(cnf->boot_path);
         PsxExeImage exe{};
         if (!parse_psx_exe(exe_bytes, exe, &err)) {
-            return fail("PS-X EXE ayristirilamadi: " + err);
+            return fail(txt("Could not read the PS-X EXE: ", "PS-X EXE okunamadı: ") + err);
         }
 
         rt.load_exe(exe, ctx);
-        std::printf("[vs_host] Yuklendi: %s (Entry PC=0x%08X, GP=0x%08X, SP=0x%08X)\n",
+        std::printf("[vs_host] Loaded: %s (Entry PC=0x%08X, GP=0x%08X, SP=0x%08X)\n",
                     cnf->boot_path.c_str(), ctx.pc, ctx.get_reg(reg::GP), ctx.get_reg(reg::SP));
         std::fflush(stdout);
     }
@@ -884,7 +892,7 @@ int main(int argc, char** argv) {
                 std::ifstream in(load_state_path, std::ios::binary);
                 std::vector<u8> data((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
                 const bool ok = rt.load_state(std::move(data), ctx);
-                std::printf("[vs_host] Durum yukleme: %s (kare %u)\n", ok ? "tamam" : "HATA", rt.vblank_count());
+                std::printf("[vs_host] State load: %s (vblank %u)\n", ok ? "ok" : "FAILED", rt.vblank_count());
             }
             // --dump-wav in headless mode records the whole run (the SPU itself keeps only ~60 ms)
             std::vector<s16> wav_all;
@@ -923,7 +931,7 @@ int main(int argc, char** argv) {
                         const auto now = std::chrono::steady_clock::now();
                         const double sec = std::chrono::duration<double>(now - last).count();
                         last = now;
-                        std::printf("[perf] kare %u: %.0f fps (%.2fx gercek zaman) | GPU primitif: %llu\n", vb, 250.0 / sec,
+                        std::printf("[perf] vblank %u: %.0f fps (%.2fx real time) | GPU primitives: %llu\n", vb, 250.0 / sec,
                                     (250.0 / sec) / (rt.video_60hz() ? 60.0 : 50.0), static_cast<unsigned long long>(rt.gpu().primitives_drawn()));
                         std::fflush(stdout);
                     }
@@ -946,7 +954,7 @@ int main(int argc, char** argv) {
                         static int last = -1;
                         const int now_v = (rt.pad_motor_small() ? 256 : 0) | rt.pad_motor_large();
                         if (now_v != last) {
-                            std::printf("[rumble] kare %u: kucuk=%d buyuk=%u\n", vb, rt.pad_motor_small() ? 1 : 0, rt.pad_motor_large());
+                            std::printf("[rumble] vblank %u: small=%d large=%u\n", vb, rt.pad_motor_small() ? 1 : 0, rt.pad_motor_large());
                             last = now_v;
                         }
                     }
@@ -960,10 +968,10 @@ int main(int argc, char** argv) {
                     const std::vector<u8> st = rt.save_state(ctx);
                     std::ofstream out(save_state_path, std::ios::binary);
                     out.write(reinterpret_cast<const char*>(st.data()), static_cast<std::streamsize>(st.size()));
-                    std::printf("[vs_host] Durum kaydedildi: kare %u, %zu bayt\n", rt.vblank_count(), st.size());
+                    std::printf("[vs_host] State saved: vblank %u, %zu bytes\n", rt.vblank_count(), st.size());
                 }
             }
-            std::printf("[vs_host] Cevrim: %llu | Son PC: 0x%08X | VBlank: %u | CD Sektor: %u (Son LBA: 0x%X) | GPU Primitif: %llu (%s %ux%u) | MDEC MB: %llu | SPU RAM: %llu B (KON: %llu, XA: %llu, Ses: %llu kare) | AOT Cagri: %llu\n",
+            std::printf("[vs_host] Cycles: %llu | Last PC: 0x%08X | VBlank: %u | CD sector: %u (last LBA: 0x%X) | GPU primitives: %llu (%s %ux%u) | MDEC MB: %llu | SPU RAM: %llu B (KON: %llu, XA: %llu, audio: %llu frames) | AOT calls: %llu\n",
                         static_cast<unsigned long long>(executed),
                         ctx.pc,
                         rt.vblank_count(),
@@ -980,7 +988,7 @@ int main(int argc, char** argv) {
                         static_cast<unsigned long long>(rt.spu().frames_rendered()),
                         static_cast<unsigned long long>(rt.aot_dispatch_count()));
             if (ctx.halted) {
-                std::printf("[vs_host] CPU durdu! PC=0x%08X\n", ctx.pc);
+                std::printf("[vs_host] CPU halted. PC=0x%08X\n", ctx.pc);
                 for (u32 r = 1; r < 32; ++r) std::printf("r%u=%08X%s", r, ctx.get_reg(r), (r % 8 == 0) ? "\n" : " ");
                 std::printf("\n");
                 dump_halt_trace();
@@ -988,17 +996,17 @@ int main(int argc, char** argv) {
                     std::printf("[stack] %08X: %08X %08X %08X %08X\n", a, rt.read32(a), rt.read32(a + 4), rt.read32(a + 8), rt.read32(a + 12));
             }
             if (!rt.tty_output().empty()) {
-                std::printf("--- BIOS TTY Ciktisi ---\n%s\n", rt.tty_output().c_str());
+                std::printf("--- BIOS TTY output ---\n%s\n", rt.tty_output().c_str());
             }
             if (!rt.cdrom().debug_log().empty()) {
-                std::printf("--- CD-ROM Komut Gunlugu ---\n%s", rt.cdrom().debug_log().c_str());
+                std::printf("--- CD-ROM command log ---\n%s", rt.cdrom().debug_log().c_str());
             }
             if (rt.gpu().frame_interpolation()) {
-                std::printf("[vs_host] Ara kare: %llu gosterildi, %llu atlandi\n", static_cast<unsigned long long>(rt.gpu().interp_shown()),
+                std::printf("[vs_host] In-between frames: %llu shown, %llu skipped\n", static_cast<unsigned long long>(rt.gpu().interp_shown()),
                             static_cast<unsigned long long>(rt.gpu().interp_skipped()));
             }
             if (texrep.active()) {
-                std::printf("[vs_host] Doku degistirme: %llu dokulu primitif, %llu tek yuklemede (%%%.1f), %llu arama, %llu isabet, %llu dokum, %zu kayitli yukleme\n",
+                std::printf("[vs_host] Texture replacement: %llu textured primitives, %llu inside one upload (%.1f%%), %llu lookups, %llu hits, %llu dumps, %zu tracked uploads\n",
                             static_cast<unsigned long long>(rt.gpu().repl_considered()), static_cast<unsigned long long>(rt.gpu().repl_in_upload()),
                             rt.gpu().repl_considered() ? 100.0 * static_cast<double>(rt.gpu().repl_in_upload()) / static_cast<double>(rt.gpu().repl_considered()) : 0.0,
                             static_cast<unsigned long long>(texrep.stats.lookups), static_cast<unsigned long long>(texrep.stats.hits),
@@ -1014,7 +1022,7 @@ int main(int argc, char** argv) {
                                    0x61746164u, bytes};
                 out.write(reinterpret_cast<const char*>(hdr), sizeof(hdr));
                 out.write(reinterpret_cast<const char*>(wav_all.data()), static_cast<std::streamsize>(bytes));
-                std::printf("[vs_host] Tum oturumun sesi (%.1f s) WAV olarak yazildi: %s\n", wav_all.size() / 2.0 / 44100.0,
+                std::printf("[vs_host] Sound of the whole run (%.1f s) written as WAV: %s\n", wav_all.size() / 2.0 / 44100.0,
                             dump_wav_path.string().c_str());
                 dump_wav_path.clear();
             }
@@ -1023,21 +1031,21 @@ int main(int argc, char** argv) {
         rt.gpu().flush_hr();
         if (!dump_ppm_path.empty()) {
             rt.gpu().dump_ppm(dump_ppm_path, !self_demo);
-            std::printf("[vs_host] VRAM goruntusu disari aktarildi: %s\n", dump_ppm_path.string().c_str());
+            std::printf("[vs_host] VRAM picture written: %s\n", dump_ppm_path.string().c_str());
         }
         if (!dump_disp_path.empty()) {
             rt.gpu().dump_ppm(dump_disp_path, false);
-            std::printf("[vs_host] Aktif ekran goruntusu disari aktarildi: %s\n", dump_disp_path.string().c_str());
+            std::printf("[vs_host] Display picture written: %s\n", dump_disp_path.string().c_str());
         }
         if (!dump_ram_path.empty()) {
             const auto ram = rt.ram_span();
             std::ofstream out(dump_ram_path, std::ios::binary);
             out.write(reinterpret_cast<const char*>(ram.data()), static_cast<std::streamsize>(ram.size()));
-            std::printf("[vs_host] PS1 RAM (%zu B) disari aktarildi: %s\n", ram.size(), dump_ram_path.string().c_str());
+            std::printf("[vs_host] PS1 RAM (%zu B) written: %s\n", ram.size(), dump_ram_path.string().c_str());
         }
         if (!dump_wav_path.empty()) {
             rt.spu().dump_wav(dump_wav_path);
-            std::printf("[vs_host] SPU 44.1 kHz Stereo WAV disari aktarildi: %s\n", dump_wav_path.string().c_str());
+            std::printf("[vs_host] SPU 44.1 kHz stereo WAV written: %s\n", dump_wav_path.string().c_str());
         }
         return 0;
     }
@@ -1087,7 +1095,7 @@ int main(int argc, char** argv) {
 
     SetWindowLongPtrA(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(&host_state));
     host_state.hidden = hidden_window;
-    host_log("Oyun penceresi olusturuldu (%s)", hwnd ? "tamam" : "HATA");
+    host_log("Game window created (%s)", hwnd ? "ok" : "FAILED");
 
     if (!sw_present) {
         std::string d3d_err;
@@ -1102,29 +1110,29 @@ int main(int argc, char** argv) {
             const bool want_gpu = gpu_hr == 1 || (gpu_hr < 0 && (!use_settings || settings.renderer == 0));
             if (!want_gpu && rt.gpu().internal_scale() > 6u) {
                 rt.gpu().set_internal_scale(6); // 7x / 8x are far too slow on the processor
-                host_log("Islemci cizimi: ic cozunurluk 6x ile sinirlandi");
+                host_log("Processor renderer: internal resolution limited to 6x");
             }
             if (want_gpu && rt.gpu().internal_scale() > 1u) {
                 use_gpu_hr(d3d.device_handle()); // Shares the window's device: no CPU copy per frame
             }
             std::printf("[vs_host] Direct3D 11 aktif (%s) - Shader: %s\n",
                         d3d.adapter_name().c_str(), d3d.shader_mode_name());
-            host_log("Direct3D 11: %s, yuksek cozunurluk %s", d3d.adapter_name().c_str(),
-                     rt.gpu().hr_backend() && rt.gpu().hr_backend()->gpu_picture_view() ? "ekran kartinda" : "islemcide");
+            host_log("Direct3D 11: %s, upscaled picture %s", d3d.adapter_name().c_str(),
+                     rt.gpu().hr_backend() && rt.gpu().hr_backend()->gpu_picture_view() ? "on the graphics card" : "on the processor");
         } else {
-            std::printf("[vs_host] D3D11 baslatilamadi (%s), GDI yedegine geciliyor.\n", d3d_err.c_str());
-            host_log("Direct3D 11 baslatilamadi (%s), GDI", d3d_err.c_str());
+            std::printf("[vs_host] D3D11 failed to start (%s), falling back to GDI.\n", d3d_err.c_str());
+            host_log("Direct3D 11 failed to start (%s), GDI", d3d_err.c_str());
         }
     }
     if (audio.initialize(PsxSpu::SAMPLE_RATE)) {
-        std::printf("[vs_host] %s 44.1 kHz Stereo SPU ADPCM ses cikisi aktif.\n", audio.backend());
+        std::printf("[vs_host] %s 44.1 kHz stereo SPU ADPCM sound output active.\n", audio.backend());
     }
-    host_log("Ses: %s", audio.is_open() ? audio.backend() : "acilamadi");
+    host_log("Sound: %s", audio.is_open() ? audio.backend() : "could not open");
     Win32GamepadInput gamepad;
     gamepad.set_log([](const char* line) { host_log("%s", line); });
     gamepad.initialize(hwnd);
-    host_log("Kontrolcu girisi hazir");
-    std::printf("[vs_host] Gamepad destegi aktif (XInput + DirectInput); kontrolcu istediginiz an takilabilir.\n");
+    host_log("Controller input ready");
+    std::printf("[vs_host] Gamepad support active (XInput + DirectInput); controllers can be plugged in at any time.\n");
     std::fflush(stdout);
     if (use_settings) {
         gamepad.set_button_map(settings.pad_map);
@@ -1132,7 +1140,7 @@ int main(int argc, char** argv) {
         audio.set_volume(static_cast<u32>(settings.volume));
         if (settings.fullscreen) {
             host_state.toggle_fullscreen(hwnd);
-            host_log("Tam ekran");
+            host_log("Fullscreen");
         }
     }
     if (hidden_window) audio.set_muted(true); // Test window: silent, also with settings
@@ -1175,7 +1183,7 @@ int main(int argc, char** argv) {
     // RetroAchievements (softcore): needs a login made in the settings window (token in the ini)
     ra::Achievements achievements;
     if (use_settings && settings.ra_enabled && !settings.ra_token.empty() && !hidden_window) {
-        host_log("RetroAchievements: %s olarak baglaniliyor", settings.ra_user.c_str());
+        host_log("RetroAchievements: connecting as %s", settings.ra_user.c_str());
         achievements.start(rt, settings.ra_user, settings.ra_token, disc_path,
                            [&](const std::string& m) { host_state.show_notice(hwnd, m, 5000); host_log("%s", m.c_str()); },
                            [&](const std::string& m) { host_log("%s", m.c_str()); });
@@ -1190,7 +1198,7 @@ int main(int argc, char** argv) {
     std::vector<u8> ra_state;  // State after the last real vblank
     if (runahead > 0) {
         rt.gpu().set_frame_interpolation(false); // Both re-show frames: not together
-        host_log("Gecikme azaltma: %d kare ileri", runahead);
+        host_log("Run-ahead: %d frames", runahead);
     }
 
     // Save states: files next to the memory card (slot 0 = automatic "continue" state)
@@ -1212,27 +1220,27 @@ int main(int argc, char** argv) {
         std::ofstream out(path, std::ios::binary | std::ios::trunc);
         out.write(reinterpret_cast<const char*>(st.data()), static_cast<std::streamsize>(st.size()));
         const bool ok = static_cast<bool>(out);
-        host_log("%s: %s (%zu bayt)", what.c_str(), ok ? "kaydedildi" : "KAYDEDILEMEDI", st.size());
-        host_state.show_notice(hwnd, what + (ok ? " kaydedildi" : " KAYDEDILEMEDI"));
+        host_log("State %s: %s (%zu bytes)", path.filename().string().c_str(), ok ? "saved" : "NOT SAVED", st.size());
+        host_state.show_notice(hwnd, what + (ok ? txt(" saved", " kaydedildi") : txt(" NOT SAVED", " KAYDEDİLEMEDİ")));
         return ok;
     };
     const auto load_state_file = [&](const std::filesystem::path& path, const std::string& what) {
         std::ifstream in(path, std::ios::binary);
         if (!in) {
-            host_state.show_notice(hwnd, what + ": kayit yok");
+            host_state.show_notice(hwnd, what + txt(": nothing saved", ": kayıt yok"));
             return false;
         }
         std::vector<u8> data((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
         const bool ok = rt.load_state(std::move(data), ctx);
-        host_log("%s: %s", what.c_str(), ok ? "yuklendi" : "YUKLENEMEDI (bozuk ya da eski surum)");
-        host_state.show_notice(hwnd, what + (ok ? " yuklendi" : " yuklenemedi"));
+        host_log("State %s: %s", path.filename().string().c_str(), ok ? "loaded" : "NOT LOADED (damaged or from an older version)");
+        host_state.show_notice(hwnd, what + (ok ? txt(" loaded", " yüklendi") : txt(" could not be loaded", " yüklenemedi")));
         return ok;
     };
 
     auto present_and_pump = [&]() {
         while (PeekMessageA(&msg, nullptr, 0, 0, PM_REMOVE)) {
             if (msg.message == WM_QUIT) {
-                host_log("Cikis mesaji alindi, emulasyon durduruluyor");
+                host_log("Quit message received, stopping emulation");
                 start_exit_watchdog();
                 running = false;
                 // Not ctx.halted: run() returns at a clean point, so the state can still be saved
@@ -1313,10 +1321,10 @@ int main(int argc, char** argv) {
             const FreeCamera::Status st = free_cam_on ? free_cam.status() : FreeCamera::Status::Idle;
             if (pushed && (!cam_log_pushed || st != cam_log_status) && cam_log_lines < 200) {
                 ++cam_log_lines;
-                host_log("Sag cubuk: ham x=%.2f y=%.2f, kullanilan x=%.2f y=%.2f -> %s", raw_x, raw_y, cam_x, cam_y,
-                         free_cam_on ? FreeCamera::status_text(st) : "serbest kamera ayarlardan kapali");
+                host_log("Right stick: raw x=%.2f y=%.2f, used x=%.2f y=%.2f -> %s", raw_x, raw_y, cam_x, cam_y,
+                         free_cam_on ? FreeCamera::status_text(st) : "free camera is off in the settings");
                 if (st == FreeCamera::Status::NotField) {
-                    host_log("  kamera 0x%08X: etkin=%u isaretci=0x%08X uzaklik=%d", free_cam.camera(), free_cam.last_active(),
+                    host_log("  camera 0x%08X: active=%u pointer=0x%08X distance=%d", free_cam.camera(), free_cam.last_active(),
                              free_cam.last_ptr(), free_cam.last_dist());
                 }
             }
@@ -1341,7 +1349,7 @@ int main(int argc, char** argv) {
             d3d.present_vram(rt.gpu(), host_state.show_full_vram,
                              launcher::ASPECT_VALUES[std::clamp(host_state.aspect, 0, launcher::ASPECT_COUNT - 1)], false);
             if (dump_now) {
-                std::printf("[vs_host] Pencere goruntusu kaydedildi: %s (kare %u)\n", window_dump_path.c_str(), rt.vblank_count());
+                std::printf("[vs_host] Window picture saved: %s (vblank %u)\n", window_dump_path.c_str(), rt.vblank_count());
                 std::fflush(stdout);
                 PostQuitMessage(0);
                 window_dump_path.clear();
@@ -1388,8 +1396,8 @@ int main(int argc, char** argv) {
             if (sec >= 10.0) {
                 if (spd_lines < 60 && !hidden_window) {
                     ++spd_lines;
-                    host_log("Hiz: %.1f kare/s (hedef %d), %.1f gosterim/s, Tab %s, ara kare %llu", (rt.vblank_count() - spd_vb0) / sec,
-                             rt.video_60hz() ? 60 : 50, spd_calls / sec, (GetAsyncKeyState(VK_TAB) & 0x8000) != 0 ? "basili" : "serbest",
+                    host_log("Speed: %.1f frames/s (target %d), %.1f presents/s, Tab %s, in-between frames %llu", (rt.vblank_count() - spd_vb0) / sec,
+                             rt.video_60hz() ? 60 : 50, spd_calls / sec, (GetAsyncKeyState(VK_TAB) & 0x8000) != 0 ? "held" : "up",
                              static_cast<unsigned long long>(rt.gpu().interp_shown()));
                 }
                 spd_t0 = now;
@@ -1406,12 +1414,12 @@ int main(int argc, char** argv) {
             present_and_pump();
         }
     } else {
-        host_log("Emulasyon basladi");
+        host_log("Emulation started");
         rt.set_vblank_callback(present_and_pump);
         if (!load_state_path.empty()) {
-            load_state_file(load_state_path, "Test durumu");
+            load_state_file(load_state_path, txt("Test state", "Test durumu"));
         } else if (autosave_on && std::filesystem::exists(state_file(0))) {
-            load_state_file(state_file(0), "Kaldiginiz yerden devam");
+            load_state_file(state_file(0), txt("Continue where you left off", "Kaldığınız yerden devam"));
         }
         while (!ctx.halted) {
             rt.run(ctx, 0x00FF'FFFF'FFFF'FFFFull);
@@ -1433,23 +1441,23 @@ int main(int argc, char** argv) {
             if (runahead > 0 && ra_phase > 0) {
                 // The last vblank ahead has been shown (or quitting): back to the real timeline,
                 // where save states, rewind and quitting below happen
-                if (!rt.load_state_fast(ra_state, ctx)) host_log("Gecikme azaltma: durum geri yuklenemedi");
+                if (!rt.load_state_fast(ra_state, ctx)) host_log("Run-ahead: state could not be restored");
                 rt.runahead_snapshot(true);
                 ra_phase = 0;
             }
             if (!running) {
                 // Quitting, stopped at a clean point: keep the state for "continue where you left off"
-                if (autosave_on) save_state_file(state_file(0), "Otomatik kayit");
+                if (autosave_on) save_state_file(state_file(0), txt("Autosave", "Otomatik kayıt"));
                 break;
             }
             if (test_save_due) {
                 test_save_due = false;
-                save_state_file(save_state_path, "Test durumu");
+                save_state_file(save_state_path, txt("Test state", "Test durumu"));
             }
             if (host_state.state_op == Win32HostState::OP_SAVE) {
-                save_state_file(state_file(host_state.state_slot), "Durum " + std::to_string(host_state.state_slot));
+                save_state_file(state_file(host_state.state_slot), txt("State ", "Durum ") + std::to_string(host_state.state_slot));
             } else if (host_state.state_op == Win32HostState::OP_LOAD) {
-                if (load_state_file(state_file(host_state.state_slot), "Durum " + std::to_string(host_state.state_slot))) achievements.reset();
+                if (load_state_file(state_file(host_state.state_slot), txt("State ", "Durum ") + std::to_string(host_state.state_slot))) achievements.reset();
             }
             host_state.state_op = Win32HostState::OP_NONE;
             if (snapshot_due) {
@@ -1462,13 +1470,13 @@ int main(int argc, char** argv) {
                 std::vector<u8> st = rewind_states.back();
                 if (rewind_states.size() > 1) rewind_states.pop_back();
                 if (rt.load_state(std::move(st), ctx)) {
-                    host_state.show_notice(hwnd, "Geri sariliyor");
+                    host_state.show_notice(hwnd, txt("Rewinding", "Geri sarılıyor"));
                     achievements.reset();
                 }
                 Sleep(120);
             }
         }
-        host_log(running ? "Emulasyon durdu (islemci durdu), pencere acik" : "Emulasyon durdu");
+        host_log(running ? "Emulation stopped (CPU halted), window open" : "Emulation stopped");
         while (running) {
             present_and_pump();
         }
@@ -1481,27 +1489,27 @@ int main(int argc, char** argv) {
         settings.aspect     = host_state.aspect;
         settings.muted      = audio.is_muted();
         launcher::save_settings(launcher::settings_path(), settings);
-        host_log("Ayarlar kaydedildi");
+        host_log("Settings saved");
     }
     gamepad.set_rumble(false, 0);
     // Shut down step by step (a hang shows in the log); the rest goes when main returns
     if (achievements.active()) {
         achievements.shutdown(); // Waits a moment for unlocks still being sent
-        host_log("RetroAchievements kapatildi");
+        host_log("RetroAchievements shut down");
     }
     if (audio.is_open()) {
-        std::printf("[vs_host] Ses kuyrugu: %u ms (%s)\n", audio.queue_ms(), audio.backend());
-        host_log("Ses kuyrugu: %u ms (%s)", audio.queue_ms(), audio.backend());
+        std::printf("[vs_host] Sound queue: %u ms (%s)\n", audio.queue_ms(), audio.backend());
+        host_log("Sound queue: %u ms (%s)", audio.queue_ms(), audio.backend());
     }
     audio.shutdown();
-    host_log("Ses kapatildi");
+    host_log("Sound closed");
     rt.gpu().set_hr_backend(nullptr); // Before the Direct3D device it may share
     d3d.shutdown();
-    host_log("Direct3D kapatildi");
+    host_log("Direct3D closed");
     if (IsWindow(hwnd)) DestroyWindow(hwnd);
     if (g_host_log) {
         std::atexit([] {
-            host_log("Surec sonlandi");
+            host_log("Process ended");
             std::fclose(g_host_log);
             g_host_log = nullptr;
         });

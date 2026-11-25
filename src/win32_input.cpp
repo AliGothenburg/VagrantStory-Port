@@ -111,7 +111,7 @@ struct Win32GamepadInput::Impl {
             di_dev->Unacquire();
             di_dev->Release();
             di_dev = nullptr;
-            std::printf("[vs_host] Gamepad ayrildi: DirectInput (%s)\n", di_name.c_str());
+            std::printf("[vs_host] Gamepad removed: DirectInput (%s)\n", di_name.c_str());
             std::fflush(stdout);
         }
     }
@@ -154,7 +154,7 @@ struct Win32GamepadInput::Impl {
             if (SUCCEEDED(dev->GetObjectInfo(&oi, a.ofs, DIPH_BYOFFSET))) axes += std::string(axes.empty() ? "" : " ") + a.name;
         }
         char line[512];
-        std::snprintf(line, sizeof(line), "Kontrolcu baglandi: DirectInput (%s), VID %04X PID %04X, eksenler: %s%s",
+        std::snprintf(line, sizeof(line), "Controller connected: DirectInput (%s), VID %04X PID %04X, axes: %s%s",
                       di_name.c_str(), LOWORD(ctx.product.Data1), HIWORD(ctx.product.Data1), axes.c_str(),
                       di_nintendo ? " (Nintendo)" : "");
         std::printf("[vs_host] %s\n", line);
@@ -206,11 +206,11 @@ struct Win32GamepadInput::Impl {
             if (XInputGetState(slot, &st) == ERROR_SUCCESS) {
                 if (!xi_connected[slot]) {
                     xi_connected[slot] = true;
-                    std::printf("[vs_host] Gamepad baglandi: XInput #%lu\n", slot + 1);
+                    std::printf("[vs_host] Gamepad connected: XInput #%lu\n", slot + 1);
                     std::fflush(stdout);
                     if (log) {
                         char line[64];
-                        std::snprintf(line, sizeof(line), "Kontrolcu baglandi: XInput #%lu", slot + 1);
+                        std::snprintf(line, sizeof(line), "Controller connected: XInput #%lu", slot + 1);
                         log(line);
                     }
                 }
@@ -220,7 +220,7 @@ struct Win32GamepadInput::Impl {
             } else {
                 if (xi_connected[slot]) {
                     xi_connected[slot] = false;
-                    std::printf("[vs_host] Gamepad ayrildi: XInput #%lu\n", slot + 1);
+                    std::printf("[vs_host] Gamepad removed: XInput #%lu\n", slot + 1);
                     std::fflush(stdout);
                 }
                 xi_next_probe[slot] = now + PROBE_INTERVAL_MS;

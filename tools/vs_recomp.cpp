@@ -85,10 +85,10 @@ int main(int argc, char** argv) {
     }
 
     if (disc_path.empty() && input_bin.empty()) {
-        std::cout << "Kullanim:\n"
-                  << "  1) Disk imajindan toplu C++ uretimi:\n"
+        std::cout << "Usage:\n"
+                  << "  1) Generate C++ for the whole disc image:\n"
                   << "     vs_recomp --disc <VagrantStory.cue|.bin|.iso> [--out-dir generated_recomp] [--max-funcs N]\n"
-                  << "  2) Tekil PS-X EXE veya .PRG dosyasindan C++ uretimi:\n"
+                  << "  2) Generate C++ from one PS-X EXE or .PRG file:\n"
                   << "     vs_recomp --input <SLUS_010.40|BATTLE.PRG> [--base 0x80068800] [--out-dir generated_recomp]\n";
         return 1;
     }
@@ -96,7 +96,7 @@ int main(int argc, char** argv) {
     if (!input_bin.empty()) {
         std::ifstream f(input_bin, std::ios::binary | std::ios::ate);
         if (!f.is_open()) {
-            std::cerr << "[HATA] Girdi dosyasi acilamadi: " << input_bin.string() << "\n";
+            std::cerr << "[ERROR] Could not open the input file: " << input_bin.string() << "\n";
             return 1;
         }
         const auto sz = static_cast<std::size_t>(f.tellg());
@@ -113,7 +113,7 @@ int main(int argc, char** argv) {
             const std::string cpp = emit_recompiled_module_cpp(funcs, exe.header.t_addr, exe.payload, opts);
             const auto out_file = out_dir / (stem + ".cpp");
             write_text_file(out_file, cpp);
-            std::printf("[OK] PS-X EXE derlendi -> %s (%zu fonksiyon)\n", out_file.string().c_str(), funcs.size());
+            std::printf("[OK] PS-X EXE translated -> %s (%zu functions)\n", out_file.string().c_str(), funcs.size());
             return 0;
         }
 
@@ -124,7 +124,7 @@ int main(int argc, char** argv) {
         const std::string cpp = emit_recompiled_module_cpp(funcs, base, raw, opts);
         const auto out_file = out_dir / (stem + ".cpp");
         write_text_file(out_file, cpp);
-        std::printf("[OK] PRG Overlay derlendi -> %s (RAM: 0x%08X, %zu fonksiyon)\n",
+        std::printf("[OK] PRG overlay translated -> %s (RAM: 0x%08X, %zu functions)\n",
                     out_file.string().c_str(), base, funcs.size());
         return 0;
     }
@@ -133,13 +133,13 @@ int main(int argc, char** argv) {
     DiscImage disc;
     std::string err;
     if (!disc.open(disc_path, &err)) {
-        std::cerr << "[HATA] Disk acilamadi: " << err << "\n";
+        std::cerr << "[ERROR] Could not open the disc: " << err << "\n";
         return 1;
     }
 
     const auto cnf = disc.parse_system_cnf();
     if (!cnf.has_value()) {
-        std::cerr << "[HATA] SYSTEM.CNF bulunamadi.\n";
+        std::cerr << "[ERROR] SYSTEM.CNF not found.\n";
         return 1;
     }
 
@@ -147,7 +147,7 @@ int main(int argc, char** argv) {
     const auto boot_raw = disc.extract_file(cnf->boot_path);
     PsxExeImage boot_exe{};
     if (!parse_psx_exe(boot_raw, boot_exe, &err)) {
-        std::cerr << "[HATA] Boot EXE ayristirilamadi: " << err << "\n";
+        std::cerr << "[ERROR] Could not parse the boot EXE: " << err << "\n";
         return 1;
     }
 
@@ -165,7 +165,7 @@ int main(int argc, char** argv) {
         generated_mods.push_back(mod_id);
         seen_mod_ids.insert(mod_id);
         total_lifted_funcs += funcs.size();
-        std::printf("[OK] Cekirdek (%s) -> %s (%zu fonksiyon)\n",
+        std::printf("[OK] Core (%s) -> %s (%zu functions)\n",
                     cnf->boot_path.c_str(), out_file.string().c_str(), funcs.size());
     }
 
@@ -183,13 +183,13 @@ int main(int argc, char** argv) {
     for (const auto& entry : prg_entries) {
         const auto bytes = disc.extract_entry(entry);
         if (bytes.size() < 4u) {
-            std::printf("[ATLANDI] Bos PRG yer tutucu (%s, %zu B)\n", entry.path.c_str(), bytes.size());
+            std::printf("[SKIPPED] Empty PRG placeholder (%s, %zu B)\n", entry.path.c_str(), bytes.size());
             continue;
         }
 
         const PrgAnalysis prg = analyze_vs_prg(entry.path, bytes);
         if (prg.inferred_base_addr == 0) {
-            std::printf("[UYARI] Taban KSEG0 adresi cozulemedi, atlandi: %s\n", entry.path.c_str());
+            std::printf("[WARNING] Base KSEG0 address not resolved, skipped: %s\n", entry.path.c_str());
             continue;
         }
 
@@ -201,7 +201,7 @@ int main(int argc, char** argv) {
         LifterOptions opts{mod_id, true, max_funcs};
         const auto funcs = discover_functions(prg.inferred_base_addr, bytes);
         if (funcs.empty()) {
-            std::printf("[ATLANDI] Fonksiyon bulunamadi (%s)\n", entry.path.c_str());
+            std::printf("[SKIPPED] No functions found (%s)\n", entry.path.c_str());
             continue;
         }
 
@@ -211,7 +211,7 @@ int main(int argc, char** argv) {
         generated_mods.push_back(mod_id);
         seen_mod_ids.insert(mod_id);
         total_lifted_funcs += funcs.size();
-        std::printf("[OK] Overlay (%-18s) -> %-28s (RAM: 0x%08X, %4zu fonksiyon)\n",
+        std::printf("[OK] Overlay (%-18s) -> %-28s (RAM: 0x%08X, %4zu functions)\n",
                     entry.path.c_str(), out_file.string().c_str(), prg.inferred_base_addr, funcs.size());
     }
 
@@ -233,7 +233,7 @@ int main(int argc, char** argv) {
         }
         reg_cpp += "    return " + std::to_string(total_lifted_funcs) + "u;\n}\n} // namespace vsport\n";
         write_text_file(out_dir / "vs_aot_registry.cpp", reg_cpp);
-        std::printf("[OK] AOT Kayit Defteri -> %s (%zu modul, toplam %zu C++ fonksiyonu)\n",
+        std::printf("[OK] AOT registry -> %s (%zu modules, %zu C++ functions in all)\n",
                     (out_dir / "vs_aot_registry.cpp").string().c_str(), generated_mods.size(), total_lifted_funcs);
     }
 

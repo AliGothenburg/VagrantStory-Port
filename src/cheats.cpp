@@ -37,7 +37,7 @@ void CheatList::parse(const std::string& text, std::vector<std::string>* problem
     std::string raw;
     int line_no = 0;
     const auto problem = [&](const std::string& what) {
-        if (problems) problems->push_back("satir " + std::to_string(line_no) + ": " + what);
+        if (problems) problems->push_back("line " + std::to_string(line_no) + ": " + what);
     };
     while (std::getline(in, raw)) {
         ++line_no;
@@ -47,7 +47,7 @@ void CheatList::parse(const std::string& text, std::vector<std::string>* problem
         if (line[0] == '[') {
             const std::size_t close = line.find(']');
             if (close == std::string::npos) {
-                problem("']' eksik");
+                problem("']' missing");
                 continue;
             }
             Cheat c;
@@ -64,7 +64,7 @@ void CheatList::parse(const std::string& text, std::vector<std::string>* problem
             if (!std::isspace(static_cast<unsigned char>(ch)) && ch != '-') hex += ch;
         }
         if (hex.size() != 12 || !is_hex(hex)) {
-            problem("kod anlasilamadi: " + line);
+            problem("code not understood: " + line);
             continue;
         }
         Code code;
@@ -77,7 +77,7 @@ void CheatList::parse(const std::string& text, std::vector<std::string>* problem
         }
         if (cheats_.empty()) {
             Cheat c;
-            c.name = "(adsiz)";
+            c.name = "(unnamed)";
             cheats_.push_back(std::move(c));
         }
         cheats_.back().codes.push_back(code);

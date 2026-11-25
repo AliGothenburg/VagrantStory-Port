@@ -407,7 +407,7 @@ bool D3D11HrBackend::init(ID3D11Device* shared, std::string* err) {
             hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, levels, 3, D3D11_SDK_VERSION,
                                    &device_, nullptr, nullptr);
         }
-        if (FAILED(hr)) return fail("D3D11 cihazi olusturulamadi");
+        if (FAILED(hr)) return fail("Could not create the D3D11 device");
     }
     device_->GetImmediateContext(&ctx_);
 
@@ -421,7 +421,7 @@ bool D3D11HrBackend::init(ID3D11Device* shared, std::string* err) {
     }
     if (FAILED(device_->CreateVertexShader(vs_blob->GetBufferPointer(), vs_blob->GetBufferSize(), nullptr, &vs_)) ||
         FAILED(device_->CreatePixelShader(ps_blob->GetBufferPointer(), ps_blob->GetBufferSize(), nullptr, &ps_))) {
-        return fail("HLSL shader nesneleri olusturulamadi");
+        return fail("Could not create the HLSL shader objects");
     }
     const D3D11_INPUT_ELEMENT_DESC il[] = {
         {"POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, offsetof(HrVertex, x), D3D11_INPUT_PER_VERTEX_DATA, 0},
@@ -443,7 +443,7 @@ bool D3D11HrBackend::init(ID3D11Device* shared, std::string* err) {
     };
     if (FAILED(device_->CreateInputLayout(il, static_cast<UINT>(std::size(il)), vs_blob->GetBufferPointer(),
                                           vs_blob->GetBufferSize(), &layout_))) {
-        return fail("D3D11 girdi duzeni olusturulamadi");
+        return fail("Could not create the D3D11 input layout");
     }
 
     D3D11_BUFFER_DESC cbd{};
@@ -451,13 +451,13 @@ bool D3D11HrBackend::init(ID3D11Device* shared, std::string* err) {
     cbd.Usage          = D3D11_USAGE_DYNAMIC;
     cbd.BindFlags      = D3D11_BIND_CONSTANT_BUFFER;
     cbd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-    if (FAILED(device_->CreateBuffer(&cbd, nullptr, &cbuffer_))) return fail("D3D11 sabit tamponu olusturulamadi");
+    if (FAILED(device_->CreateBuffer(&cbd, nullptr, &cbuffer_))) return fail("Could not create the D3D11 constant buffer");
 
     D3D11_RASTERIZER_DESC rd{};
     rd.FillMode        = D3D11_FILL_SOLID;
     rd.CullMode        = D3D11_CULL_NONE;
     rd.DepthClipEnable = FALSE;
-    if (FAILED(device_->CreateRasterizerState(&rd, &raster_))) return fail("D3D11 rasterizer durumu olusturulamadi");
+    if (FAILED(device_->CreateRasterizerState(&rd, &raster_))) return fail("Could not create the D3D11 rasterizer state");
 
     // PS1 semi-transparency as blend states. Alpha (= mask bit) always takes the drawn value.
     // "Check mask" (GP0 E6h): the picture's alpha is exactly 0 or 1, so weighting the source by
@@ -485,7 +485,7 @@ bool D3D11HrBackend::init(ID3D11Device* shared, std::string* err) {
                 case BLEND_MIX:   t.SrcBlend = D3D11_BLEND_BLEND_FACTOR; t.DestBlend = D3D11_BLEND_INV_BLEND_FACTOR; break;
                 default: break;
             }
-            if (FAILED(device_->CreateBlendState(&bd, &blend_[mode][check]))) return fail("D3D11 karisim durumu olusturulamadi");
+            if (FAILED(device_->CreateBlendState(&bd, &blend_[mode][check]))) return fail("Could not create the D3D11 blend state");
         }
     }
 
@@ -501,7 +501,7 @@ bool D3D11HrBackend::init(ID3D11Device* shared, std::string* err) {
     td.CPUAccessFlags   = D3D11_CPU_ACCESS_WRITE;
     if (FAILED(device_->CreateTexture2D(&td, nullptr, &vram_tex_)) ||
         FAILED(device_->CreateShaderResourceView(vram_tex_.Get(), nullptr, &vram_srv_))) {
-        return fail("D3D11 VRAM dokusu olusturulamadi");
+        return fail("Could not create the D3D11 VRAM texture");
     }
     return true;
 }

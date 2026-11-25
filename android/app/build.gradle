@@ -13,8 +13,8 @@ android {
         applicationId 'io.github.aligothenburg.vagrantstory'
         minSdk 24
         targetSdk 36
-        versionCode 5
-        versionName '0.3.2'
+        versionCode 6
+        versionName '0.3.3'
         externalNativeBuild {
             cmake {
                 arguments '-DANDROID_STL=c++_static', '-DVSPORT_LINK_AOT=OFF', "-DVSPORT_SDL_SOURCE_DIR=${sdlSource}"

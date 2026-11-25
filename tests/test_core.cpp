@@ -1,4 +1,4 @@
-﻿#include "vsport/cdrom_iso.hpp"
+#include "vsport/cdrom_iso.hpp"
 #include "vsport/cfg_lifter.hpp"
 #include "vsport/cheats.hpp"
 #include "vsport/free_camera.hpp"
@@ -1206,9 +1206,9 @@ int main() {
     test_bios_memcard_file_calls();
 
     if (g_failures == 0) {
-        std::cout << "[PASS] Tum vsport cekirdek testleri basariyla gecti!\n";
+        std::cout << "[PASS] All vsport core tests passed!\n";
         return 0;
     }
-    std::cerr << "[FAIL] Toplam basarisiz test: " << g_failures << "\n";
+    std::cerr << "[FAIL] Failed tests: " << g_failures << "\n";
     return 1;
 }

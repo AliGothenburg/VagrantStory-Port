@@ -3,6 +3,7 @@
 // Settings window shown when VagrantStory.exe starts: game folder / disc image / .sbi, display
 // and sound options. Everything is stored in VagrantStory.ini next to the executable.
 
+#include "vsport/i18n.hpp"
 #include "vsport/pad_mapping.hpp"
 
 #include <filesystem>
@@ -14,8 +15,13 @@ namespace vsport::launcher {
 constexpr int ASPECT_COUNT = 6;
 constexpr float ASPECT_VALUES[ASPECT_COUNT] = {4.0f / 3.0f, 10.0f / 7.0f, 3.0f / 2.0f,
                                                16.0f / 10.0f, 16.0f / 9.0f, 0.0f};
-constexpr const char* ASPECT_NAMES[ASPECT_COUNT] = {"4:3", "10:7", "3:2", "16:10", "16:9", "Doldur"};
+constexpr const char* ASPECT_NAMES[ASPECT_COUNT] = {"4:3", "10:7", "3:2", "16:10", "16:9", "Fill"};
 constexpr int ASPECT_16_9 = 4;
+// Name of an aspect ratio for the player (the last one is a word)
+[[nodiscard]] inline const char* aspect_name(int aspect) noexcept {
+    if (aspect < 0 || aspect >= ASPECT_COUNT) aspect = 0;
+    return aspect == ASPECT_COUNT - 1 ? txt("Fill", "Doldur") : ASPECT_NAMES[aspect];
+}
 
 // Window heights offered in the settings (client area; width follows the aspect ratio)
 constexpr int WINDOW_HEIGHT_COUNT = 7;
@@ -64,6 +70,7 @@ struct GameSettings {
     bool free_camera    = true;   // Right stick turns / tilts the field camera (vsport/free_camera.hpp)
     bool show_launcher  = true;   // Show this window on every start (Shift forces it)
     int  touch_controls = 0;      // On-screen buttons (SDL host): 0 = when the screen is touched, 1 = always, 2 = never
+    int  language       = 0;      // Texts: 0 = follow the system, 1 = English, 2 = Turkish (vsport/i18n.hpp)
     pad::ButtonMap pad_map = pad::default_button_map(); // Controller button remap
 };
 
@@ -77,11 +84,12 @@ void set_data_dir(const std::filesystem::path& dir);
 // Texture pack folder next to the exe ("dokular"); dumps go to its "_dokum" subfolder
 [[nodiscard]] std::filesystem::path texture_pack_dir();
 [[nodiscard]] std::filesystem::path default_memcard_path(); // saves\VagrantStory_kart1.mcr next to the exe
+// Also switches the program's language to the "language" setting
 [[nodiscard]] GameSettings load_settings(const std::filesystem::path& ini);
 void save_settings(const std::filesystem::path& ini, const GameSettings& s);
 
-// Shows the settings window. Returns true when the player pressed "Oyna" (settings are saved),
-// false when the window was closed or "Cikis" was pressed.
+// Shows the settings window. Returns true when the player pressed Play (settings are saved),
+// false when the window was closed or Quit was pressed.
 [[nodiscard]] bool run_settings_window(GameSettings& s);
 
 // Diagnostics: opens the settings window off-screen, saves each page as DIR\page_N.bmp, closes it

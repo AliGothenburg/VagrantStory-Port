@@ -1,4 +1,5 @@
 #include "vsport/cdrom_iso.hpp"
+#include "vsport/i18n.hpp"
 
 #include <algorithm>
 #include <array>
@@ -59,7 +60,7 @@ std::string normalize_iso_path(std::string_view raw) {
 std::filesystem::path DiscImage::resolve_cue_to_bin(const std::filesystem::path& cue_path, std::string* err_out) {
     std::ifstream cue(cue_path);
     if (!cue.is_open()) {
-        if (err_out) *err_out = "CUE dosyasi acilamadi: " + cue_path.string();
+        if (err_out) *err_out = txt("Could not open the CUE file: ", "CUE dosyası açılamadı: ") + cue_path.string();
         return {};
     }
 
@@ -85,13 +86,13 @@ std::filesystem::path DiscImage::resolve_cue_to_bin(const std::filesystem::path&
                 if (std::filesystem::exists(candidate)) {
                     return candidate;
                 }
-                if (err_out) *err_out = "CUE icindeki BIN dosyasi bulunamadi: " + candidate.string();
+                if (err_out) *err_out = txt("The BIN file named in the CUE was not found: ", "CUE içindeki BIN dosyası bulunamadı: ") + candidate.string();
                 return {};
             }
         }
     }
 
-    if (err_out) *err_out = "CUE icinde gecerli bir FILE satiri bulunamadi.";
+    if (err_out) *err_out = txt("The CUE has no valid FILE line.", "CUE içinde geçerli bir FILE satırı bulunamadı.");
     return {};
 }
 
@@ -118,13 +119,13 @@ bool DiscImage::open(const std::filesystem::path& path, std::string* err_out) {
 
     stream_.open(bin_path_, std::ios::binary | std::ios::ate);
     if (!stream_.is_open()) {
-        if (err_out) *err_out = "Disk imaji acilamadi: " + bin_path_.string();
+        if (err_out) *err_out = txt("Could not open the disc image: ", "Disk imajı açılamadı: ") + bin_path_.string();
         return false;
     }
 
     file_size_ = static_cast<u64>(stream_.tellg());
     if (file_size_ < 17 * 2048) {
-        if (err_out) *err_out = "Disk imaji ISO9660 PVD (LBA 16) icin cok kucuk.";
+        if (err_out) *err_out = txt("The disc image is too small for an ISO9660 PVD (LBA 16).", "Disk imajı ISO9660 PVD (LBA 16) için çok küçük.");
         return false;
     }
 
@@ -174,7 +175,7 @@ u32 bcd_msf_to_lba(const u8* msf) noexcept {
 bool DiscImage::load_sbi(const std::filesystem::path& path, std::string* err_out) {
     std::ifstream in(path, std::ios::binary);
     if (!in.is_open()) {
-        if (err_out) *err_out = "SBI dosyasi acilamadi: " + path.string();
+        if (err_out) *err_out = txt("Could not open the SBI file: ", "SBI dosyası açılamadı: ") + path.string();
         return false;
     }
     const std::vector<u8> data((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
@@ -264,7 +265,7 @@ bool DiscImage::detect_geometry(std::string* err_out) {
         }
     }
 
-    if (err_out) *err_out = "LBA 16 uzerinde gecerli bir ISO9660 'CD001' Primary Volume Descriptor bulunamadi.";
+    if (err_out) *err_out = txt("No valid ISO9660 'CD001' Primary Volume Descriptor at LBA 16.", "LBA 16 üzerinde geçerli bir ISO9660 'CD001' Primary Volume Descriptor bulunamadı.");
     return false;
 }
 

@@ -219,7 +219,7 @@ int main() {
     const D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_10_0};
     if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, levels, 3, D3D11_SDK_VERSION, &warp.dev,
                                  nullptr, nullptr))) {
-        std::cerr << "[FAIL] WARP cihazi olusturulamadi\n";
+        std::cerr << "[FAIL] Could not create the WARP device\n";
         return 1;
     }
     std::printf("Ekran karti (WARP) / islemci yuksek cozunurluk karsilastirmasi, %ux:\n", S);
@@ -415,7 +415,7 @@ int main() {
                 for (u32 x = 320 * S; x < 640 * S && left < 0; ++x) {
                     if (((*alt)[static_cast<std::size_t>(60 * S) * w + x] & 0xFFFFFFu) != 0) left = static_cast<s32>(x / S) - 320;
                 }
-                std::printf("  %-34s triangle at x %d (expected 60)\n", "ara kare (iki kare arasi)", left);
+                std::printf("  %-34s triangle at x %d (expected 60)\n", "interpolated (between frames)", left);
                 CHECK(left >= 59 && left <= 61, "interpolation: triangle at x " << left << ", expected 60");
             }
             g.on_vblank();
@@ -426,13 +426,13 @@ int main() {
     }
 
     if (g_failures == 0) {
-        std::printf("[PASS] Ekran karti ve islemci cizimi ayni sonucu veriyor.\n");
+        std::printf("[PASS] Graphics card and CPU renderers give the same result.\n");
         return 0;
     }
-    std::printf("[FAIL] %d hata\n", g_failures);
+    std::printf("[FAIL] %d failures\n", g_failures);
     return 1;
 #else
-    std::printf("Direct3D 11 testi yalnizca Windows'ta calisir.\n");
+    std::printf("The Direct3D 11 test only runs on Windows.\n");
     return 0;
 #endif
 }

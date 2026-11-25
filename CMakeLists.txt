@@ -20,6 +20,7 @@ add_library(vsport_core STATIC
     src/savestate.cpp
     src/cheats.cpp
     src/free_camera.cpp
+    src/i18n.cpp
     src/texture_replace.cpp
     src/psx_exe.cpp
     src/mips_decoder.cpp

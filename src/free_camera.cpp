@@ -1,4 +1,4 @@
-﻿#include "vsport/free_camera.hpp"
+#include "vsport/free_camera.hpp"
 
 #include "vsport/runtime.hpp"
 
@@ -59,11 +59,11 @@ float FreeCamera::shape(float raw, float dead_zone) noexcept {
 
 const char* FreeCamera::status_text(Status s) noexcept {
     switch (s) {
-        case Status::Idle:         return "cubuk serbest";
-        case Status::Moved:        return "kamera dondu";
-        case Status::OtherProgram: return "oyun alani motoru (BATTLE.PRG) yuklu degil: acilis, baslik, son";
-        case Status::NotField:     return "oyun alani kamerasi kullanilmiyor (menu, ara sahne, baslik)";
-        case Status::AtLimit:      return "egim sinirda";
+        case Status::Idle:         return "stick at rest";
+        case Status::Moved:        return "camera turned";
+        case Status::OtherProgram: return "field engine (BATTLE.PRG) not loaded: intro, title, ending";
+        case Status::NotField:     return "field camera not in use (menu, cutscene, title)";
+        case Status::AtLimit:      return "tilt at its limit";
     }
     return "?";
 }

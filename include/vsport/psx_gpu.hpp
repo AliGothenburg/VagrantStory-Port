@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include "vsport/hr_backend.hpp"
 #include "vsport/pgxp.hpp"

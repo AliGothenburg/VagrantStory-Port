@@ -102,31 +102,31 @@ std::optional<VsOverlayProfile> lookup_vs_overlay_profile(std::string_view filen
 
     if (base == "SLUS_010.40" || base == "SLES_027.54" || base == "SLPS_023.77") {
         return VsOverlayProfile{base, VsOverlaySlot::ResidentCore, 0x80010000u,
-                                "Kalici cekirdek yurutulebilir dosya (PsyQ, sistem baslatici, genel durum)"};
+                                "Resident core executable (PsyQ, system startup, global state)"};
     }
     if (base == "BATTLE.PRG") {
         return VsOverlayProfile{base, VsOverlaySlot::PrimaryEngine, 0x80068800u,
-                                "Ana 3B alan, aktor fizigi, carpisma ve savas motoru"};
+                                "Main 3D field, actor physics, collision and battle engine"};
     }
     if (base == "TITLE.PRG") {
         return VsOverlayProfile{base, VsOverlaySlot::PrimaryEngine, 0x80068800u,
-                                "Baslik ekrani, giris sinematikleri ve yeni oyun baslatici"};
+                                "Title screen, intro cutscenes and new-game setup"};
     }
     if (base == "ENDING.PRG") {
         return VsOverlayProfile{base, VsOverlaySlot::PrimaryEngine, 0x80068800u,
-                                "Kapanis sahneleri ve jenerik motoru"};
+                                "Ending scenes and credits engine"};
     }
     if (base == "MAINMENU.PRG") {
         return VsOverlayProfile{base, VsOverlaySlot::MenuManager, 0x800F9800u,
-                                "Ana menu dagiticisi ve alt menu yukleyici (vs_mainMenu_exec)"};
+                                "Main menu dispatcher and sub-menu loader (vs_mainMenu_exec)"};
     }
     if (base.rfind("MENU", 0) == 0 && base.size() >= 9 && base.substr(base.size() - 4) == ".PRG") {
         return VsOverlayProfile{base, VsOverlaySlot::SubMenu, 0x80102800u,
-                                "Dinamik alt menu modulu (buyu, envanter, durum, harita, atolye, kayit)"};
+                                "Dynamic sub-menu module (magic, inventory, status, map, workshop, save)"};
     }
     if (base == "INITBTL.PRG" || base == "SCREFF2.PRG") {
         return VsOverlayProfile{base, VsOverlaySlot::BattleAux, 0x800F9800u,
-                                "Savas baslatma / ekran efektleri yardimci overlay modulu"};
+                                "Battle start / screen effects helper overlay"};
     }
     return std::nullopt;
 }

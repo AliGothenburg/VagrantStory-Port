@@ -1,4 +1,5 @@
 #include "vsport/memcard.hpp"
+#include "vsport/i18n.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -62,7 +63,7 @@ bool MemoryCard::open(const std::filesystem::path& path, std::string* err) {
         } else if (buf.size() == CARD_SIZE + 3904u) {
             data_.assign(buf.begin() + 3904, buf.end());
         } else {
-            if (err) *err = "Hafiza karti dosyasi 128 KB degil: " + path.string();
+            if (err) *err = txt("The memory card file is not 128 KB: ", "Hafıza kartı dosyası 128 KB değil: ") + path.string();
             return false;
         }
         dirty_ = false;
@@ -88,14 +89,14 @@ bool MemoryCard::flush(std::string* err) {
         std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
         out.write(reinterpret_cast<const char*>(data_.data()), static_cast<std::streamsize>(data_.size()));
         if (!out.good()) {
-            if (err) *err = "Hafiza karti yazilamadi: " + tmp.string();
+            if (err) *err = txt("Could not write the memory card: ", "Hafıza kartı yazılamadı: ") + tmp.string();
             return false;
         }
     }
     std::error_code ec;
     std::filesystem::rename(tmp, path_, ec);
     if (ec) {
-        if (err) *err = "Hafiza karti kaydedilemedi: " + path_.string() + " (" + ec.message() + ")";
+        if (err) *err = txt("Could not save the memory card: ", "Hafıza kartı kaydedilemedi: ") + path_.string() + " (" + ec.message() + ")";
         return false;
     }
     dirty_ = false;

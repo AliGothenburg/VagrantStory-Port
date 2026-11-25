@@ -3,6 +3,7 @@
 // thread in pump(), so rc_client is only ever used from one thread.
 #include "achievements.hpp"
 
+#include "vsport/i18n.hpp"
 #include "vsport/runtime.hpp"
 
 #include "rc_api_user.h"
@@ -30,6 +31,8 @@
 #endif
 
 namespace ra {
+
+using vsport::txt;
 
 namespace {
 
@@ -219,7 +222,7 @@ bool login_with_password(const std::string& user, const std::string& password, s
     params.password = password.c_str();
     rc_api_request_t request{};
     if (rc_api_init_login_request(&request, &params) != RC_OK) {
-        error_out = "Giriş isteği hazırlanamadı";
+        error_out = txt("Could not prepare the sign-in request", "Giriş isteği hazırlanamadı");
         return false;
     }
     const HttpResult r = http_request(request.url, request.post_data,
@@ -227,7 +230,7 @@ bool login_with_password(const std::string& user, const std::string& password, s
                                       std::string(CLIENT_NAME) + " rcheevos/12.5");
     rc_api_destroy_request(&request);
     if (r.status < 0) {
-        error_out = "Sunucuya bağlanılamadı (internet bağlantısını kontrol edin)";
+        error_out = txt("Could not reach the server (check your internet connection)", "Sunucuya bağlanılamadı (internet bağlantısını kontrol edin)");
         return false;
     }
     rc_api_server_response_t server{};
@@ -241,7 +244,7 @@ bool login_with_password(const std::string& user, const std::string& password, s
         token_out = resp.api_token;
         display_name_out = resp.display_name ? resp.display_name : (resp.username ? resp.username : user);
     } else {
-        error_out = resp.response.error_message ? resp.response.error_message : "Giriş başarısız";
+        error_out = resp.response.error_message ? resp.response.error_message : txt("Sign-in failed", "Giriş başarısız");
     }
     rc_api_destroy_login_response(&resp);
     return ok;
@@ -305,21 +308,21 @@ struct Achievements::Impl {
         switch (e->type) {
             case RC_CLIENT_EVENT_ACHIEVEMENT_TRIGGERED:
                 if (e->achievement) {
-                    const std::string msg = "Başarım açıldı: " + std::string(e->achievement->title) + " (" +
+                    const std::string msg = txt("Achievement unlocked: ", "Başarım açıldı: ") + std::string(e->achievement->title) + " (" +
                                             std::to_string(e->achievement->points) + " puan)";
                     if (im->notify) im->notify(msg);
                     if (im->log) im->log("RetroAchievements: " + msg + " - " + (e->achievement->description ? e->achievement->description : ""));
                 }
                 break;
             case RC_CLIENT_EVENT_GAME_COMPLETED:
-                if (im->notify) im->notify("Tüm başarımlar tamamlandı!");
+                if (im->notify) im->notify(txt("All achievements completed!", "Tüm başarımlar tamamlandı!"));
                 break;
             case RC_CLIENT_EVENT_LEADERBOARD_SUBMITTED:
-                if (e->leaderboard && im->log) im->log(std::string("RetroAchievements: skor gönderildi: ") + e->leaderboard->title);
+                if (e->leaderboard && im->log) im->log(std::string("RetroAchievements: score sent: ") + e->leaderboard->title);
                 break;
             case RC_CLIENT_EVENT_SERVER_ERROR:
                 if (e->server_error && im->log) {
-                    im->log(std::string("RetroAchievements: sunucu hatasi (") + (e->server_error->api ? e->server_error->api : "?") + "): " +
+                    im->log(std::string("RetroAchievements: server error (") + (e->server_error->api ? e->server_error->api : "?") + "): " +
                             (e->server_error->error_message ? e->server_error->error_message : ""));
                 }
                 break;
@@ -336,14 +339,15 @@ struct Achievements::Impl {
             rc_client_user_game_summary_t sum{};
             rc_client_get_user_game_summary(c, &sum);
             if (im->notify) {
-                im->notify("RetroAchievements: " + std::string(g && g->title ? g->title : "oyun") + " - " +
+                im->notify("RetroAchievements: " + std::string(g && g->title ? g->title : txt("game", "oyun")) + " - " +
                            std::to_string(sum.num_unlocked_achievements) + "/" + std::to_string(sum.num_core_achievements) +
-                           " başarım (softcore)");
+                           txt(" achievements (softcore)", " başarım (softcore)"));
             }
         } else if (result == RC_NO_GAME_LOADED) {
-            if (im->notify) im->notify("RetroAchievements: bu disk sürümü için başarım seti yok (yalnızca ABD sürümü, SLUS-01040)");
+            if (im->notify) im->notify(txt("RetroAchievements: no achievement set for this disc release (US release only, SLUS-01040)",
+                                       "RetroAchievements: bu disk sürümü için başarım seti yok (yalnızca ABD sürümü, SLUS-01040)"));
         } else if (im->notify) {
-            im->notify(std::string("RetroAchievements: oyun yüklenemedi (") + (error ? error : "?") + ")");
+            im->notify(std::string(txt("RetroAchievements: could not load the game (", "RetroAchievements: oyun yüklenemedi (")) + (error ? error : "?") + ")");
         }
     }
 
@@ -351,7 +355,7 @@ struct Achievements::Impl {
         Impl* im = of(c);
         if (!im) return;
         if (result != RC_OK) {
-            if (im->notify) im->notify(std::string("RetroAchievements: giriş başarısız (") + (error ? error : "?") + ")");
+            if (im->notify) im->notify(std::string(txt("RetroAchievements: sign-in failed (", "RetroAchievements: giriş başarısız (")) + (error ? error : "?") + ")");
             return;
         }
         rc_client_begin_identify_and_load_game(c, RC_CONSOLE_PLAYSTATION, im->disc_utf8.c_str(), nullptr, 0, &Impl::load_done, nullptr);

@@ -74,42 +74,42 @@ int main(int argc, char** argv) {
     }
 
     if (disc_path.empty()) {
-        std::cout << "Kullanim: vs_inspect --disc <VagrantStory.cue|.bin|.iso> [--extract-dir <klasor>]\n";
+        std::cout << "Usage: vs_inspect --disc <VagrantStory.cue|.bin|.iso> [--extract-dir <folder>]\n";
         return 1;
     }
 
     DiscImage disc;
     std::string err;
     if (!disc.open(disc_path, &err)) {
-        std::cerr << "[HATA] Disk acilamadi: " << err << "\n";
+        std::cerr << "[ERROR] Could not open the disc: " << err << "\n";
         return 1;
     }
 
-    std::printf("=== Vagrant Story Disk Analizi ===\n");
-    std::printf("Ikili Dosya   : %s\n", disc.binary_path().string().c_str());
-    std::printf("Sektor Formati: %s\n", sector_fmt_str(disc.sector_format()));
-    std::printf("Toplam Sektor : %u\n", disc.total_sectors());
+    std::printf("=== Vagrant Story Disc Analysis ===\n");
+    std::printf("Binary file   : %s\n", disc.binary_path().string().c_str());
+    std::printf("Sector format : %s\n", sector_fmt_str(disc.sector_format()));
+    std::printf("Total sectors : %u\n", disc.total_sectors());
     std::printf("Volume ID     : %s\n", disc.volume_id().c_str());
-    std::printf("Toplam Kayit  : %zu dosya/klasor\n\n", disc.files().size());
+    std::printf("Entries       : %zu files/folders\n\n", disc.files().size());
 
     const auto cnf = disc.parse_system_cnf();
     if (cnf.has_value()) {
         std::printf("--- SYSTEM.CNF ---\n");
-        std::printf("BOOT  : %s  (cozulmus yol: %s)\n", cnf->boot_raw.c_str(), cnf->boot_path.c_str());
+        std::printf("BOOT  : %s  (resolved path: %s)\n", cnf->boot_raw.c_str(), cnf->boot_path.c_str());
         std::printf("TCB   : %u | EVENT: %u | STACK: 0x%08X\n\n", cnf->tcb, cnf->event, cnf->stack);
 
         const auto boot_bytes = disc.extract_file(cnf->boot_path);
         PsxExeImage exe{};
         if (!boot_bytes.empty() && parse_psx_exe(boot_bytes, exe, &err)) {
             const auto funcs = discover_functions(exe.header.t_addr, exe.payload, exe.header.pc0);
-            std::printf("--- Ana Cekirdek Yurutulebilir (%s) ---\n", cnf->boot_path.c_str());
-            std::printf("Yukleme Adresi (t_addr): 0x%08X\n", exe.header.t_addr);
-            std::printf("Boyut          (t_size): 0x%08X (%u KB)\n", exe.header.t_size, exe.header.t_size / 1024u);
-            std::printf("Giris Noktasi  (pc0)   : 0x%08X\n", exe.header.pc0);
+            std::printf("--- Main core executable (%s) ---\n", cnf->boot_path.c_str());
+            std::printf("Load address   (t_addr): 0x%08X\n", exe.header.t_addr);
+            std::printf("Size           (t_size): 0x%08X (%u KB)\n", exe.header.t_size, exe.header.t_size / 1024u);
+            std::printf("Entry point    (pc0)   : 0x%08X\n", exe.header.pc0);
             std::printf("Global Pointer (gp0)   : 0x%08X\n", exe.header.gp0);
-            std::printf("Yigin          (sp)    : 0x%08X\n", exe.header.s_addr + exe.header.s_size);
-            std::printf("Bolge Imzasi           : %s\n", exe.header.ascii_marker.c_str());
-            std::printf("Kesfedilen Fonksiyon   : %zu adet\n\n", funcs.size());
+            std::printf("Stack          (sp)    : 0x%08X\n", exe.header.s_addr + exe.header.s_size);
+            std::printf("Region marker          : %s\n", exe.header.ascii_marker.c_str());
+            std::printf("Functions found        : %zu\n\n", funcs.size());
 
             if (disasm_addr != 0) {
                 // --prg <ISO path>: disassemble that overlay at its load address instead of the core EXE
@@ -119,13 +119,13 @@ int main(int argc, char** argv) {
                     code = disc.extract_file(disasm_prg);
                     const auto analysis = analyze_vs_prg(disasm_prg, code);
                     if (code.empty() || analysis.inferred_base_addr == 0) {
-                        std::cerr << "[HATA] Overlay bulunamadi veya yukleme adresi cozulemedi: " << disasm_prg << "\n";
+                        std::cerr << "[ERROR] Overlay not found or its load address could not be resolved: " << disasm_prg << "\n";
                         return 1;
                     }
                     base_k = to_kseg0(analysis.inferred_base_addr);
                 }
                 const u32 start_k = to_kseg0(disasm_addr);
-                std::printf("--- Disassembly @ 0x%08X (%u talimat) ---\n", start_k, disasm_count);
+                std::printf("--- Disassembly @ 0x%08X (%u instructions) ---\n", start_k, disasm_count);
                 for (u32 k = 0; k < disasm_count; ++k) {
                     const u32 cur = start_k + k * 4u;
                     if (cur < base_k || (cur - base_k + 4u) > code.size()) break;
@@ -150,9 +150,9 @@ int main(int argc, char** argv) {
         }
     }
 
-    std::printf("--- Kesfedilen .PRG Overlay Modulleri ---\n");
+    std::printf("--- .PRG overlay modules found ---\n");
     std::printf("%-22s | %-8s | %-9s | %-22s | %-10s | %-12s | %-6s | %-6s | %-6s\n",
-                "Dosya Yolu", "LBA", "Boyut", "Overlay Yuvasi", "TahminiRAM", "Kod Araligi", "Fonk", "JAL", "GTE");
+                "File path", "LBA", "Size", "Overlay slot", "Est. RAM", "Code range", "Funcs", "JAL", "GTE");
     std::printf("-----------------------------------------------------------------------------------------------------------------------------\n");
 
     u32 prg_count = 0;
@@ -191,10 +191,10 @@ int main(int argc, char** argv) {
         }
     }
 
-    std::printf("\nToplam %u adet .PRG overlay modulu analiz edildi (%zu overlay fonksiyonu).\n",
+    std::printf("\nAnalysed %u .PRG overlay modules (%zu overlay functions).\n",
                 prg_count, total_prg_funcs);
     if (!extract_dir.empty()) {
-        std::printf("Dosyalar suraya cikarildi: %s\n", extract_dir.string().c_str());
+        std::printf("Files extracted to: %s\n", extract_dir.string().c_str());
     }
     return 0;
 }
